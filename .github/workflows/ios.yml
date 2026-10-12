@@ -20,6 +20,21 @@ jobs:
           unzip -q -o /tmp/YbridOpus.xcframework.zip -d "$DEST"
           ls -la "$DEST/YbridOpus.xcframework"
 
+      - name: Patch Swift concurrency error
+        run: |
+          python3 - <<'PYEOF'
+          path = 'xiaozhi/ChatViewModel.swift'
+          with open(path) as f:
+              lines = f.readlines()
+          idx = 805  # line 806 (0-indexed)
+          assert 'self.audioService.stopPlaying()' in lines[idx], f"Unexpected line 806: {lines[idx]}"
+          assert 'func mcpDidRequestCamera' in ''.join(lines[790:805]), "Not in mcpDidRequestCamera"
+          lines[idx] = '        Task { @MainActor in self.audioService.stopPlaying() }\n'
+          with open(path, 'w') as f:
+              f.writelines(lines)
+          print("Patched ChatViewModel.swift line 806")
+          PYEOF
+
       - name: Generate shared scheme
         run: |
           mkdir -p xiaozhi.xcodeproj/xcshareddata/xcschemes
