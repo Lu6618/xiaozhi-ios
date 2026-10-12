@@ -1,0 +1,43 @@
+name: Build unsigned IPA
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Archive (unsigned)
+        run: |
+          xcodebuild -project xiaozhi.xcodeproj \
+            -target xiaozhi \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/xiaozhi.xcarchive \
+            PRODUCT_BUNDLE_IDENTIFIER=com.lu6618.xiaozhi \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH=$(find build/xiaozhi.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
+          echo "App: $APP_PATH"
+          ls -la "$APP_PATH" | head -20
+          rm -rf Payload && mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          rm -f xiaozhi-ios-unsigned.ipa
+          zip -qr xiaozhi-ios-unsigned.ipa Payload
+          ls -la xiaozhi-ios-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi-ios-unsigned
+          path: xiaozhi-ios-unsigned.ipa
+          if-no-files-found: error
