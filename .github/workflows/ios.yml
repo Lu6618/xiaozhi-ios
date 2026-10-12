@@ -3,6 +3,9 @@ name: Build unsigned IPA
 on:
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: macos-15
@@ -123,3 +126,13 @@ jobs:
           name: xiaozhi-ios-unsigned
           path: xiaozhi-ios-unsigned.ipa
           if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="unsigned-${{ github.run_number }}"
+          gh release create "$TAG" \
+            --title "Unsigned IPA #$TAG" \
+            --notes "未签名 IPA，下载后自签安装。" \
+            xiaozhi-ios-unsigned.ipa
