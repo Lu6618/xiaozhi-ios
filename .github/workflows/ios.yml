@@ -17,7 +17,7 @@ jobs:
 
       - name: Build libopus (static, iOS arm64)
         run: |
-                    curl -sL -o /tmp/opus.tar.gz "https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz"
+          curl -sL -o /tmp/opus.tar.gz "https://github.com/xiph/opus/releases/download/v1.5.2/opus-1.5.2.tar.gz"
           file /tmp/opus.tar.gz | grep -q "gzip" || { echo "ERROR: opus tarball download failed"; cat /tmp/opus.tar.gz; exit 1; }
           tar xzf /tmp/opus.tar.gz -C /tmp
           cd /tmp/opus-1.5.2
@@ -147,4 +147,63 @@ jobs:
             </ArchiveAction>
           </Scheme>
           SCHEME_EOF
-          ls -la xiaozhi.xcodeproj/xcshareddata/xcs
+          ls -la xiaozhi.xcodeproj/xcshareddata/xcschemes/
+
+      - name: Set display name
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 小智" xiaozhi/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" xiaozhi/Info.plist
+
+      - name: Archive (unsigned, static opus)
+        run: |
+          xcodebuild -project xiaozhi.xcodeproj \
+            -scheme xiaozhi \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/xiaozhi.xcarchive \
+            PRODUCT_BUNDLE_IDENTIFIER=com.lu6618.xiaozhi \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            HEADER_SEARCH_PATHS='$(inherited) /tmp/opus-install/include' \
+            LIBRARY_SEARCH_PATHS='$(inherited) /tmp/opus-install/lib' \
+            OTHER_LDFLAGS='$(inherited) -lopus' \
+            archive
+
+      - name: Verify no embedded frameworks
+        run: |
+          APP_PATH=$(find build/xiaozhi.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
+          echo "App: $APP_PATH"
+          if [ -d "$APP_PATH/Frameworks" ]; then
+            echo "WARNING: Frameworks dir exists:"
+            ls -la "$APP_PATH/Frameworks/"
+          else
+            echo "OK: no Frameworks directory (all static)"
+          fi
+          ls -la "$APP_PATH" | head -20
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH=$(find build/xiaozhi.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
+          rm -rf Payload && mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          rm -f xiaozhi-ios-unsigned.ipa
+          zip -qr xiaozhi-ios-unsigned.ipa Payload
+          ls -la xiaozhi-ios-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi-ios-unsigned
+          path: xiaozhi-ios-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="unsigned-${{ github.run_number }}"
+          gh release create "$TAG" \
+            --title "Unsigned IPA #$TAG" \
+            --notes "未签名 IPA，下载后自签安装。" \
+            xiaozhi-ios-unsigned.ipa
