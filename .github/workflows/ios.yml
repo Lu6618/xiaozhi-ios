@@ -12,6 +12,14 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Fetch YbridOpus.xcframework
+        run: |
+          DEST="$(dirname "$(dirname "$GITHUB_WORKSPACE")")/Downloads"
+          mkdir -p "$DEST"
+          curl -sL -o /tmp/YbridOpus.xcframework.zip "https://github.com/ybrid/opus-swift/releases/download/0.8.0/YbridOpus.xcframework.zip"
+          unzip -q -o /tmp/YbridOpus.xcframework.zip -d "$DEST"
+          ls -la "$DEST/YbridOpus.xcframework"
+
       - name: Generate shared scheme
         run: |
           mkdir -p xiaozhi.xcodeproj/xcshareddata/xcschemes
