@@ -110,24 +110,22 @@ jobs:
               assert old_state in content, "batteryVM state not found"
               content = content.replace(old_state,
                   old_state + '    @EnvironmentObject var chatVM: ChatViewModel\n', 1)
-              # 4b: 在实时对话按钮前加通话按钮
-              old_link = textwrap.dedent('''\
-                  // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink
-                  NavigationLink(destination: ContentView()) {
-                      ChatEntryButton() // 抽取出来的按钮样式
-                  }''')
+              # 4b: 在实时对话按钮前加通话按钮（用显式 \n 拼接，保留 Swift 原文 24 格缩进）
+              old_link = ('                        // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink\n'
+                        '                        NavigationLink(destination: ContentView()) {\n'
+                        '                            ChatEntryButton() // 抽取出来的按钮样式\n'
+                        '                        }')
               assert old_link in content, "ChatEntryButton link not found"
-              new_link = textwrap.dedent('''\
-                  // 通话按钮：直达免提 Live2D 语音通话
-                  NavigationLink(destination: HandsFreeLive2DView(chatVM: chatVM)) {
-                      CallEntryButton()
-                  }
-                  .padding(.trailing, 12)
-
-                  // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink
-                  NavigationLink(destination: ContentView()) {
-                      ChatEntryButton() // 抽取出来的按钮样式
-                  }''')
+              new_link = ('                        // 通话按钮：直达免提 Live2D 语音通话\n'
+                        '                        NavigationLink(destination: HandsFreeLive2DView(chatVM: chatVM)) {\n'
+                        '                            CallEntryButton()\n'
+                        '                        }\n'
+                        '                        .padding(.trailing, 12)\n'
+                        '\n'
+                        '                        // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink\n'
+                        '                        NavigationLink(destination: ContentView()) {\n'
+                        '                            ChatEntryButton() // 抽取出来的按钮样式\n'
+                        '                        }')
               content = content.replace(old_link, new_link, 1)
               # 4c: 在 ChatEntryButton 结构体后追加 CallEntryButton
               # Swift 原文缩进为 8/8/4/0，YAML 要求每行 ≥10 格，故统一加 14 格前缀，dedent 还原
