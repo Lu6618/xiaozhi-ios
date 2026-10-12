@@ -12,10 +12,42 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Generate shared scheme
+        run: |
+          mkdir -p xiaozhi.xcodeproj/xcshareddata/xcschemes
+          TARGET_ID=$(grep -B1 'isa = PBXNativeTarget' xiaozhi.xcodeproj/project.pbxproj | head -1 | awk '{print $1}')
+          echo "Target ID: $TARGET_ID"
+          cat > xiaozhi.xcodeproj/xcshareddata/xcschemes/xiaozhi.xcscheme <<SCHEME_EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Scheme LastUpgradeVersion="1600" version="1.7">
+            <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
+              <BuildActionEntries>
+                <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
+                  <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="$TARGET_ID" BuildableName="xiaozhi.app" BlueprintName="xiaozhi" ReferencedContainer="container:xiaozhi.xcodeproj">
+                  </BuildableReference>
+                </BuildActionEntry>
+              </BuildActionEntries>
+            </BuildAction>
+            <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+              <Testables>
+              </Testables>
+            </TestAction>
+            <LaunchAction buildConfiguration="Release" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" debugServiceExtension="internal" allowLocationSimulation="YES">
+            </LaunchAction>
+            <ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES">
+            </ProfileAction>
+            <AnalyzeAction buildConfiguration="Debug">
+            </AnalyzeAction>
+            <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES">
+            </ArchiveAction>
+          </Scheme>
+          SCHEME_EOF
+          ls -la xiaozhi.xcodeproj/xcshareddata/xcschemes/
+
       - name: Archive (unsigned)
         run: |
           xcodebuild -project xiaozhi.xcodeproj \
-            -target xiaozhi \
+            -scheme xiaozhi \
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath build/xiaozhi.xcarchive \
