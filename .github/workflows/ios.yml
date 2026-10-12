@@ -42,11 +42,9 @@ jobs:
           def patch_file(path, old, new, desc):
               with open(path) as f:
                   content = f.read()
-              if new in content:
-                  print(f"SKIP {desc}: already patched")
-                  return
               if old not in content:
-                  print(f"WARN {desc}: target not found, skipping")
+                  # old 已不存在：要么已打过补丁，要么 Lu 自己改掉了，都跳过
+                  print(f"SKIP {desc}: target not found (already patched or modified)")
                   return
               content = content.replace(old, new, 1)
               with open(path, 'w') as f:
@@ -97,7 +95,7 @@ jobs:
               print("SKIP ChatViewModel patches: already patched or not found")
 
           # Patch 4: 锁屏页"实时对话"按钮旁加绿色通话按钮，直达 HandsFreeLive2DView
-          # 注意：YAML literal block 要求所有行缩进足够，故多行字符串用 textwrap.dedent 处理
+          # 注意：YAML literal block 要求所有行缩进足够，故多行字符串用 \n 拼接，避免三引号低缩进破坏 YAML
           path = 'xiaozhi/LockScreenView.swift'
           with open(path) as f:
               content = f.read()
@@ -163,6 +161,40 @@ jobs:
               with open(path, 'w') as f:
                   f.write(content)
               print("OK Patch 4: added CallEntryButton next to 实时对话")
+
+          # Patch 4d: 移除 ContentView 顶部旧的绿色通话按钮（已移到锁屏页；齿轮/调试入口保留）
+          path = 'xiaozhi/ContentView.swift'
+          with open(path) as f:
+              lines = f.readlines()
+          target = None
+          for i, l in enumerate(lines):
+              if 'phone.circle.fill' in l:
+                  target = i
+                  break
+          if target is None:
+              print("SKIP Patch 4d: old call button not found (already removed)")
+          else:
+              start = target
+              for j in range(target, max(-1, target-6), -1):
+                  if 'NavigationLink' in lines[j] and 'HandsFreeLive2DView' in lines[j]:
+                      start = j
+                      break
+              if start > 0 and '免提模式入口' in lines[start-1]:
+                  start -= 1
+              depth = 0
+              end = None
+              for j in range(start, len(lines)):
+                  depth += lines[j].count('{') - lines[j].count('}')
+                  if depth == 0 and j > start:
+                      end = j
+                      break
+              if end is None:
+                  print("WARN Patch 4d: block end not found, skipped")
+              else:
+                  del lines[start:end+1]
+                  with open(path, 'w') as f:
+                      f.writelines(lines)
+                  print(f"OK Patch 4d: removed old call button (lines {start+1}-{end+1})")
           print("All patches done (idempotent)")
           PYEOF
 
