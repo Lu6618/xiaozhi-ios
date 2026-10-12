@@ -33,6 +33,37 @@ jobs:
           with open(path, 'w') as f:
               f.writelines(lines)
           print("Patched ChatViewModel.swift line 806")
+          # --- second patch: handleIncomingMessage lines 764-765 ---
+          with open(path) as f:
+              lines = f.readlines()
+          # find "if !self.audioService.isRecording {" inside handleIncomingMessage
+          start = None
+          for i, l in enumerate(lines):
+              if 'func handleIncomingMessage' in l:
+                  start = i
+                  break
+          assert start is not None, "handleIncomingMessage not found"
+          tgt = None
+          for i in range(start, len(lines)):
+              if 'if !self.audioService.isRecording {' in lines[i]:
+                  tgt = i
+                  break
+              if i - start > 200:
+                  break
+          assert tgt is not None, "isRecording check not found in handleIncomingMessage"
+          assert 'self.audioService.startRecording()' in lines[tgt + 1], f"Unexpected line {tgt+2}: {lines[tgt+1]}"
+          assert lines[tgt + 2].strip() == '}', f"Unexpected line {tgt+3}: {lines[tgt+2]}"
+          indent = lines[tgt][:len(lines[tgt]) - len(lines[tgt].lstrip())]
+          lines[tgt:tgt + 3] = [
+              indent + 'Task { @MainActor in\n',
+              indent + '    if !self.audioService.isRecording {\n',
+              indent + '        self.audioService.startRecording()\n',
+              indent + '    }\n',
+              indent + '}\n',
+          ]
+          with open(path, 'w') as f:
+              f.writelines(lines)
+          print(f"Patched ChatViewModel.swift lines {tgt+1}-{tgt+3}")
           PYEOF
 
       - name: Generate shared scheme
