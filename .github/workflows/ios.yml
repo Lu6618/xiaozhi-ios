@@ -115,6 +115,12 @@ jobs:
             SWIFT_STRICT_CONCURRENCY=minimal \
             archive
 
+      - name: Strip vendor signature from framework
+        run: |
+          APP_PATH=$(find build/xiaozhi.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
+          rm -rf "$APP_PATH/Frameworks/YbridOpus.framework/_CodeSignature"
+          ls -la "$APP_PATH/Frameworks/YbridOpus.framework/"
+
       - name: Package unsigned IPA
         run: |
           APP_PATH=$(find build/xiaozhi.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
