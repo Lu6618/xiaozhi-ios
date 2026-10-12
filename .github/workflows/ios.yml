@@ -96,6 +96,11 @@ jobs:
           SCHEME_EOF
           ls -la xiaozhi.xcodeproj/xcshareddata/xcschemes/
 
+      - name: Set display name
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 小智" xiaozhi/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" xiaozhi/Info.plist
+
       - name: Archive (unsigned)
         run: |
           xcodebuild -project xiaozhi.xcodeproj \
