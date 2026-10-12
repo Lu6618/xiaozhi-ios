@@ -15,15 +15,26 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
-      - name: Fetch YbridOpus.xcframework
+      - name: Build libopus (static, iOS arm64)
         run: |
-          DEST="$(dirname "$(dirname "$GITHUB_WORKSPACE")")/Downloads"
-          mkdir -p "$DEST"
-          curl -sL -o /tmp/YbridOpus.xcframework.zip "https://github.com/ybrid/opus-swift/releases/download/0.8.0/YbridOpus.xcframework.zip"
-          unzip -q -o /tmp/YbridOpus.xcframework.zip -d "$DEST"
-          ls -la "$DEST/YbridOpus.xcframework"
+          curl -sL -o /tmp/opus.tar.gz "https://archive.mozilla.org/pub/opus/opus-1.5.2.tar.gz"
+          tar xzf /tmp/opus.tar.gz -C /tmp
+          cd /tmp/opus-1.5.2
+          SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
+          echo "SDK: $SDK_PATH"
+          ./configure --host=aarch64-apple-darwin \
+            --disable-shared --enable-static \
+            --disable-doc --disable-extra-programs \
+            --prefix=/tmp/opus-install \
+            CC=clang \
+            CFLAGS="-arch arm64 -miphoneos-version-min=17.6 -isysroot $SDK_PATH -O2" \
+            CPPFLAGS="-isysroot $SDK_PATH"
+          make -j$(sysctl -n hw.ncpu)
+          make install
+          ls -lh /tmp/opus-install/lib/libopus.a
+          ls /tmp/opus-install/include/opus/
 
-      - name: Patch Swift concurrency errors
+      - name: Patch Swift concurrency errors + switch to static opus
         run: |
           python3 - <<'PYEOF'
           # Patch 1: AudioService 不需要绑 MainActor（AVAudioEngine 线程安全），去掉它消除 9 处报错
@@ -33,9 +44,37 @@ jobs:
           old = '@MainActor\nclass AudioService {'
           assert old in content, "@MainActor class AudioService not found"
           content = content.replace(old, 'class AudioService {', 1)
+          # Patch 1b: 去掉 import YbridOpus（改用 bridging header 引入静态 libopus）
+          old_import = 'import YbridOpus\n'
+          assert old_import in content, "import YbridOpus not found"
+          content = content.replace(old_import, '', 1)
           with open(path, 'w') as f:
               f.write(content)
-          print("Patch 1: removed @MainActor from AudioService")
+          print("Patch 1: removed @MainActor from AudioService, removed import YbridOpus")
+
+          # Patch 1d: 修复 AppConfigService 的必崩 bug：URL(string: "")! 强制解包 nil
+          # 上游 configURL 是空字符串，单例初始化时直接 fatal error，导致启动秒退
+          path = 'xiaozhi/AppConfigService.swift'
+          with open(path) as f:
+              content = f.read()
+          old_url = 'private let configURL = URL(string: "")!'
+          assert old_url in content, "empty configURL not found"
+          content = content.replace(old_url, 'private let configURL = URL(string: "https://example.com")! // fixed: empty string URL crashes on force-unwrap', 1)
+          with open(path, 'w') as f:
+              f.write(content)
+          print("Patch 1d: fixed AppConfigService empty URL force-unwrap crash")
+
+          # Patch 1c: bridging header 引入 opus.h（静态库头文件）
+          bh_path = 'xiaozhi/xiaozhi-Bridging-Header.h'
+          with open(bh_path) as f:
+              bh = f.read()
+          assert '#include <opus/opus.h>' not in bh, "opus.h already in bridging header"
+          old_guard = '#endif /* xiaozhi_Bridging_Header_h */'
+          assert old_guard in bh, "bridging header guard not found"
+          bh = bh.replace(old_guard, '// Opus (static lib, built from source)\n#include <opus/opus.h>\n\n' + old_guard, 1)
+          with open(bh_path, 'w') as f:
+              f.write(bh)
+          print("Patch 1c: added #include <opus/opus.h> to bridging header")
 
           # Patch 2 & 3: 包裹 ChatViewModel 自身 @MainActor 方法的跨线程调用
           path = 'xiaozhi/ChatViewModel.swift'
@@ -63,6 +102,19 @@ jobs:
               f.writelines(lines)
           print("All patches applied")
           PYEOF
+
+      - name: Remove YbridOpus.xcframework from project
+        run: |
+          # 删除 pbxproj 里所有 YbridOpus 引用（link phase / embed phase / file reference）
+          for id in 9B2ECFF92EC898F90082B028 9B2ECFFA2EC898F90082B028 9B2ECFF82EC898F90082B028; do
+            sed -i '' "/$id/d" xiaozhi.xcodeproj/project.pbxproj
+          done
+          if grep -q "YbridOpus" xiaozhi.xcodeproj/project.pbxproj; then
+            echo "ERROR: YbridOpus still referenced in pbxproj"
+            grep -n "YbridOpus" xiaozhi.xcodeproj/project.pbxproj
+            exit 1
+          fi
+          echo "YbridOpus fully removed from pbxproj"
 
       - name: Generate shared scheme
         run: |
@@ -94,56 +146,4 @@ jobs:
             </ArchiveAction>
           </Scheme>
           SCHEME_EOF
-          ls -la xiaozhi.xcodeproj/xcshareddata/xcschemes/
-
-      - name: Set display name
-        run: |
-          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 小智" xiaozhi/Info.plist
-          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" xiaozhi/Info.plist
-
-      - name: Archive (unsigned)
-        run: |
-          xcodebuild -project xiaozhi.xcodeproj \
-            -scheme xiaozhi \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            -archivePath build/xiaozhi.xcarchive \
-            PRODUCT_BUNDLE_IDENTIFIER=com.lu6618.xiaozhi \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO \
-            SWIFT_STRICT_CONCURRENCY=minimal \
-            archive
-
-      - name: Strip vendor signature from framework
-        run: |
-          APP_PATH=$(find build/xiaozhi.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
-          rm -rf "$APP_PATH/Frameworks/YbridOpus.framework/_CodeSignature"
-          ls -la "$APP_PATH/Frameworks/YbridOpus.framework/"
-
-      - name: Package unsigned IPA
-        run: |
-          APP_PATH=$(find build/xiaozhi.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
-          echo "App: $APP_PATH"
-          ls -la "$APP_PATH" | head -20
-          rm -rf Payload && mkdir -p Payload
-          cp -R "$APP_PATH" Payload/
-          rm -f xiaozhi-ios-unsigned.ipa
-          zip -qr xiaozhi-ios-unsigned.ipa Payload
-          ls -la xiaozhi-ios-unsigned.ipa
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: xiaozhi-ios-unsigned
-          path: xiaozhi-ios-unsigned.ipa
-          if-no-files-found: error
-
-      - name: Publish to GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TAG="unsigned-${{ github.run_number }}"
-          gh release create "$TAG" \
-            --title "Unsigned IPA #$TAG" \
-            --notes "未签名 IPA，下载后自签安装。" \
-            xiaozhi-ios-unsigned.ipa
+          ls -la xiaozhi.xcodeproj/xcshareddata/xcs
