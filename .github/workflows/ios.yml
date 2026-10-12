@@ -97,64 +97,70 @@ jobs:
               print("SKIP ChatViewModel patches: already patched or not found")
 
           # Patch 4: 锁屏页"实时对话"按钮旁加绿色通话按钮，直达 HandsFreeLive2DView
+          # 注意：YAML literal block 要求所有行缩进足够，故多行字符串用 textwrap.dedent 处理
           path = 'xiaozhi/LockScreenView.swift'
           with open(path) as f:
               content = f.read()
           if 'CallEntryButton' in content:
               print("SKIP Patch 4: CallEntryButton already exists")
           else:
+              import textwrap
               # 4a: 注入 EnvironmentObject
               old_state = '    @StateObject var batteryVM = BatteryViewModel()\n'
               assert old_state in content, "batteryVM state not found"
               content = content.replace(old_state,
                   old_state + '    @EnvironmentObject var chatVM: ChatViewModel\n', 1)
               # 4b: 在实时对话按钮前加通话按钮
-              old_link = '''                        // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink
-                        NavigationLink(destination: ContentView()) {
-                            ChatEntryButton() // 抽取出来的按钮样式
-                        }'''
+              old_link = textwrap.dedent('''\
+                  // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink
+                  NavigationLink(destination: ContentView()) {
+                      ChatEntryButton() // 抽取出来的按钮样式
+                  }''')
               assert old_link in content, "ChatEntryButton link not found"
-              new_link = '''                        // 通话按钮：直达免提 Live2D 语音通话
-                        NavigationLink(destination: HandsFreeLive2DView(chatVM: chatVM)) {
-                            CallEntryButton()
-                        }
-                        .padding(.trailing, 12)
+              new_link = textwrap.dedent('''\
+                  // 通话按钮：直达免提 Live2D 语音通话
+                  NavigationLink(destination: HandsFreeLive2DView(chatVM: chatVM)) {
+                      CallEntryButton()
+                  }
+                  .padding(.trailing, 12)
 
-                        // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink
-                        NavigationLink(destination: ContentView()) {
-                            ChatEntryButton() // 抽取出来的按钮样式
-                        }'''
+                  // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink
+                  NavigationLink(destination: ContentView()) {
+                      ChatEntryButton() // 抽取出来的按钮样式
+                  }''')
               content = content.replace(old_link, new_link, 1)
               # 4c: 在 ChatEntryButton 结构体后追加 CallEntryButton
-              old_struct_end = '''        // 添加点击时的按压效果
-        .contentShape(Circle())
-    }
-}'''
+              # Swift 原文缩进为 8/8/4/0，YAML 要求每行 ≥10 格，故统一加 14 格前缀，dedent 还原
+              old_struct_end = textwrap.dedent('''\
+                      // 添加点击时的按压效果
+                      .contentShape(Circle())
+                  }
+              }''')
               assert old_struct_end in content, "ChatEntryButton struct end not found"
-              call_button = '''
+              call_button = textwrap.dedent('''\
 
-struct CallEntryButton: View {
-    var body: some View {
-        ZStack {
-            Circle()
-                .stroke(Color.white.opacity(0.3), lineWidth: 2)
-                .frame(width: 45, height: 45)
-            Circle()
-                .trim(from: 0, to: 0.7)
-                .stroke(Color.green, style: StrokeStyle(lineWidth: 2, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-                .frame(width: 45, height: 45)
-            VStack(spacing: 2) {
-                Image(systemName: "phone.fill")
-                    .font(.system(size: 14))
-                Text("语音通话")
-                    .font(.system(size: 8, weight: .bold))
-            }
-            .foregroundColor(.white)
-        }
-        .contentShape(Circle())
-    }
-}'''
+                  struct CallEntryButton: View {
+                      var body: some View {
+                          ZStack {
+                              Circle()
+                                  .stroke(Color.white.opacity(0.3), lineWidth: 2)
+                                  .frame(width: 45, height: 45)
+                              Circle()
+                                  .trim(from: 0, to: 0.7)
+                                  .stroke(Color.green, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                                  .rotationEffect(.degrees(-90))
+                                  .frame(width: 45, height: 45)
+                              VStack(spacing: 2) {
+                                  Image(systemName: "phone.fill")
+                                      .font(.system(size: 14))
+                                  Text("语音通话")
+                                      .font(.system(size: 8, weight: .bold))
+                              }
+                              .foregroundColor(.white)
+                          }
+                          .contentShape(Circle())
+                      }
+                  }''')
               content = content.replace(old_struct_end, old_struct_end + call_button, 1)
               with open(path, 'w') as f:
                   f.write(content)
