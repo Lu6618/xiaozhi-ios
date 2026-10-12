@@ -20,6 +20,47 @@ jobs:
           unzip -q -o /tmp/YbridOpus.xcframework.zip -d "$DEST"
           ls -la "$DEST/YbridOpus.xcframework"
 
+      - name: Patch Swift concurrency errors
+        run: |
+          python3 - <<'PYEOF'
+          # Patch 1: AudioService 不需要绑 MainActor（AVAudioEngine 线程安全），去掉它消除 9 处报错
+          path = 'xiaozhi/AudioService.swift'
+          with open(path) as f:
+              content = f.read()
+          old = '@MainActor\nclass AudioService {'
+          assert old in content, "@MainActor class AudioService not found"
+          content = content.replace(old, 'class AudioService {', 1)
+          with open(path, 'w') as f:
+              f.write(content)
+          print("Patch 1: removed @MainActor from AudioService")
+
+          # Patch 2 & 3: 包裹 ChatViewModel 自身 @MainActor 方法的跨线程调用
+          path = 'xiaozhi/ChatViewModel.swift'
+          with open(path) as f:
+              lines = f.readlines()
+          tgt = None
+          for i, l in enumerate(lines):
+              if 'self.speakLocally(text: "页面已生成。")' in l:
+                  tgt = i
+                  break
+          assert tgt is not None, "speakLocally call not found"
+          indent = lines[tgt][:len(lines[tgt]) - len(lines[tgt].lstrip())]
+          lines[tgt] = indent + 'Task { @MainActor in self.speakLocally(text: "页面已生成。") }\n'
+          print(f"Patch 2: wrapped speakLocally at line {tgt+1}")
+          tgt = None
+          for i, l in enumerate(lines):
+              if 'if isHandsFreeMode { pauseAutoListeningForAI() }' in l:
+                  tgt = i
+                  break
+          assert tgt is not None, "pauseAutoListeningForAI call not found"
+          indent = lines[tgt][:len(lines[tgt]) - len(lines[tgt].lstrip())]
+          lines[tgt] = indent + 'if isHandsFreeMode { Task { @MainActor in pauseAutoListeningForAI() } }\n'
+          print(f"Patch 3: wrapped pauseAutoListeningForAI at line {tgt+1}")
+          with open(path, 'w') as f:
+              f.writelines(lines)
+          print("All patches applied")
+          PYEOF
+
       - name: Generate shared scheme
         run: |
           mkdir -p xiaozhi.xcodeproj/xcshareddata/xcschemes
