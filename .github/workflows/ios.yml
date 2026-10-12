@@ -38,70 +38,128 @@ jobs:
       - name: Patch Swift concurrency errors + switch to static opus
         run: |
           python3 - <<'PYEOF'
-          # Patch 1: AudioService 不需要绑 MainActor（AVAudioEngine 线程安全），去掉它消除 9 处报错
-          path = 'xiaozhi/AudioService.swift'
-          with open(path) as f:
-              content = f.read()
-          old = '@MainActor\nclass AudioService {'
-          assert old in content, "@MainActor class AudioService not found"
-          content = content.replace(old, 'class AudioService {', 1)
-          # Patch 1b: 去掉 import YbridOpus（改用 bridging header 引入静态 libopus）
-          old_import = 'import YbridOpus\n'
-          assert old_import in content, "import YbridOpus not found"
-          content = content.replace(old_import, '', 1)
-          with open(path, 'w') as f:
-              f.write(content)
-          print("Patch 1: removed @MainActor from AudioService, removed import YbridOpus")
+          # 所有补丁都是幂等的：已打过就跳过，找不到目标就警告不断言，保证 Lu 自己改代码不撞车
+          def patch_file(path, old, new, desc):
+              with open(path) as f:
+                  content = f.read()
+              if new in content:
+                  print(f"SKIP {desc}: already patched")
+                  return
+              if old not in content:
+                  print(f"WARN {desc}: target not found, skipping")
+                  return
+              content = content.replace(old, new, 1)
+              with open(path, 'w') as f:
+                  f.write(content)
+              print(f"OK {desc}")
 
-          # Patch 1d: 修复 AppConfigService 的必崩 bug：URL(string: "")! 强制解包 nil
-          # 上游 configURL 是空字符串，单例初始化时直接 fatal error，导致启动秒退
-          path = 'xiaozhi/AppConfigService.swift'
-          with open(path) as f:
-              content = f.read()
-          old_url = 'private let configURL = URL(string: "")!'
-          assert old_url in content, "empty configURL not found"
-          content = content.replace(old_url, 'private let configURL = URL(string: "https://example.com")! // fixed: empty string URL crashes on force-unwrap', 1)
-          with open(path, 'w') as f:
-              f.write(content)
-          print("Patch 1d: fixed AppConfigService empty URL force-unwrap crash")
+          # Patch 1: AudioService 去掉 @MainActor
+          patch_file('xiaozhi/AudioService.swift',
+                     '@MainActor\nclass AudioService {',
+                     'class AudioService {',
+                     "remove @MainActor from AudioService")
+          # Patch 1b: 去掉 import YbridOpus
+          patch_file('xiaozhi/AudioService.swift',
+                     'import YbridOpus\n', '',
+                     "remove import YbridOpus")
+          # Patch 1d: 修复 AppConfigService 空 URL 必崩
+          patch_file('xiaozhi/AppConfigService.swift',
+                     'private let configURL = URL(string: "")!',
+                     'private let configURL = URL(string: "https://example.com")! // fixed: empty string URL crashes on force-unwrap',
+                     "fix AppConfigService empty URL crash")
+          # Patch 1c: bridging header 引入 opus.h
+          patch_file('xiaozhi/xiaozhi-Bridging-Header.h',
+                     '#endif /* xiaozhi_Bridging_Header_h */',
+                     '// Opus (static lib, built from source)\n#include <opus/opus.h>\n\n#endif /* xiaozhi_Bridging_Header_h */',
+                     "add opus.h to bridging header")
 
-          # Patch 1c: bridging header 引入 opus.h（静态库头文件）
-          bh_path = 'xiaozhi/xiaozhi-Bridging-Header.h'
-          with open(bh_path) as f:
-              bh = f.read()
-          assert '#include <opus/opus.h>' not in bh, "opus.h already in bridging header"
-          old_guard = '#endif /* xiaozhi_Bridging_Header_h */'
-          assert old_guard in bh, "bridging header guard not found"
-          bh = bh.replace(old_guard, '// Opus (static lib, built from source)\n#include <opus/opus.h>\n\n' + old_guard, 1)
-          with open(bh_path, 'w') as f:
-              f.write(bh)
-          print("Patch 1c: added #include <opus/opus.h> to bridging header")
-
-          # Patch 2 & 3: 包裹 ChatViewModel 自身 @MainActor 方法的跨线程调用
+          # Patch 2 & 3: 包裹 ChatViewModel 跨线程调用（按行处理，已包过的跳过）
           path = 'xiaozhi/ChatViewModel.swift'
           with open(path) as f:
               lines = f.readlines()
-          tgt = None
+          changed = False
           for i, l in enumerate(lines):
-              if 'self.speakLocally(text: "页面已生成。")' in l:
-                  tgt = i
-                  break
-          assert tgt is not None, "speakLocally call not found"
-          indent = lines[tgt][:len(lines[tgt]) - len(lines[tgt].lstrip())]
-          lines[tgt] = indent + 'Task { @MainActor in self.speakLocally(text: "页面已生成。") }\n'
-          print(f"Patch 2: wrapped speakLocally at line {tgt+1}")
-          tgt = None
-          for i, l in enumerate(lines):
-              if 'if isHandsFreeMode { pauseAutoListeningForAI() }' in l:
-                  tgt = i
-                  break
-          assert tgt is not None, "pauseAutoListeningForAI call not found"
-          indent = lines[tgt][:len(lines[tgt]) - len(lines[tgt].lstrip())]
-          lines[tgt] = indent + 'if isHandsFreeMode { Task { @MainActor in pauseAutoListeningForAI() } }\n'
-          print(f"Patch 3: wrapped pauseAutoListeningForAI at line {tgt+1}")
-          with open(path, 'w') as f:
-              f.writelines(lines)
-          print("All patches applied")
+              stripped = l.strip()
+              if stripped == 'self.speakLocally(text: "页面已生成。")':
+                  indent = l[:len(l) - len(l.lstrip())]
+                  lines[i] = indent + 'Task { @MainActor in self.speakLocally(text: "页面已生成。") }\n'
+                  changed = True
+                  print(f"OK wrapped speakLocally at line {i+1}")
+              elif stripped == 'if isHandsFreeMode { pauseAutoListeningForAI() }':
+                  indent = l[:len(l) - len(l.lstrip())]
+                  lines[i] = indent + 'if isHandsFreeMode { Task { @MainActor in pauseAutoListeningForAI() } }\n'
+                  changed = True
+                  print(f"OK wrapped pauseAutoListeningForAI at line {i+1}")
+          if changed:
+              with open(path, 'w') as f:
+                  f.writelines(lines)
+          else:
+              print("SKIP ChatViewModel patches: already patched or not found")
+
+          # Patch 4: 锁屏页"实时对话"按钮旁加绿色通话按钮，直达 HandsFreeLive2DView
+          path = 'xiaozhi/LockScreenView.swift'
+          with open(path) as f:
+              content = f.read()
+          if 'CallEntryButton' in content:
+              print("SKIP Patch 4: CallEntryButton already exists")
+          else:
+              # 4a: 注入 EnvironmentObject
+              old_state = '    @StateObject var batteryVM = BatteryViewModel()\n'
+              assert old_state in content, "batteryVM state not found"
+              content = content.replace(old_state,
+                  old_state + '    @EnvironmentObject var chatVM: ChatViewModel\n', 1)
+              # 4b: 在实时对话按钮前加通话按钮
+              old_link = '''                        // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink
+                        NavigationLink(destination: ContentView()) {
+                            ChatEntryButton() // 抽取出来的按钮样式
+                        }'''
+              assert old_link in content, "ChatEntryButton link not found"
+              new_link = '''                        // 通话按钮：直达免提 Live2D 语音通话
+                        NavigationLink(destination: HandsFreeLive2DView(chatVM: chatVM)) {
+                            CallEntryButton()
+                        }
+                        .padding(.trailing, 12)
+
+                        // 2️⃣ 修改：替换原来的 CircularProgressView 为 NavigationLink
+                        NavigationLink(destination: ContentView()) {
+                            ChatEntryButton() // 抽取出来的按钮样式
+                        }'''
+              content = content.replace(old_link, new_link, 1)
+              # 4c: 在 ChatEntryButton 结构体后追加 CallEntryButton
+              old_struct_end = '''        // 添加点击时的按压效果
+        .contentShape(Circle())
+    }
+}'''
+              assert old_struct_end in content, "ChatEntryButton struct end not found"
+              call_button = '''
+
+struct CallEntryButton: View {
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(Color.white.opacity(0.3), lineWidth: 2)
+                .frame(width: 45, height: 45)
+            Circle()
+                .trim(from: 0, to: 0.7)
+                .stroke(Color.green, style: StrokeStyle(lineWidth: 2, lineCap: .round))
+                .rotationEffect(.degrees(-90))
+                .frame(width: 45, height: 45)
+            VStack(spacing: 2) {
+                Image(systemName: "phone.fill")
+                    .font(.system(size: 14))
+                Text("语音通话")
+                    .font(.system(size: 8, weight: .bold))
+            }
+            .foregroundColor(.white)
+        }
+        .contentShape(Circle())
+    }
+}'''
+              content = content.replace(old_struct_end, old_struct_end + call_button, 1)
+              with open(path, 'w') as f:
+                  f.write(content)
+              print("OK Patch 4: added CallEntryButton next to 实时对话")
+          print("All patches done (idempotent)")
           PYEOF
 
       - name: Remove YbridOpus.xcframework from project
