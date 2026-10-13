@@ -317,30 +317,6 @@ jobs:
               print("OK Patch 10: added TextEntryButton next to call button")
           PYEOF
 
-      - name: Patch 11 Text button via NavigationLink
-        run: |
-          python3 - <<'PYEOF'
-          path = 'xiaozhi/LockScreenView.swift'
-          with open(path) as f: c = f.read()
-          # 把 Patch 10 的 Button 换成 NavigationLink（与旁边按钮一致，避免 Button 在此 HStack 不渲染）
-          old_btn = ('                        // 文字对话按钮：打开文本输入对话\n'
-                   '                        Button(action: { showTextChat = true }) {\n'
-                   '                            TextEntryButton()\n'
-                   '                        }\n'
-                   '                        .padding(.trailing, 12)\n')
-          if old_btn in c:
-              new_btn = ('                        // 文字对话按钮：打开文本输入对话\n'
-                       '                        NavigationLink(destination: NavigationStack { TextChatView().environmentObject(chatVM) }) {\n'
-                       '                            TextEntryButton()\n'
-                       '                        }\n'
-                       '                        .padding(.trailing, 12)\n')
-              c = c.replace(old_btn, new_btn, 1)
-              with open(path, 'w') as f: f.write(c)
-              print("OK Patch 11: Button -> NavigationLink")
-          else:
-              print("SKIP Patch 11: Button pattern not found")
-          PYEOF
-
       - name: Patch 9 Widget extension
         run: |
           python3 - <<'PYEOF'
