@@ -317,6 +317,17 @@ jobs:
               print("OK Patch 10: added TextEntryButton next to call button")
           PYEOF
 
+
+      - name: Patch 13 Minimal new UI test
+        run: |
+          python3 - <<'PYEOF'
+          import base64
+          path = 'xiaozhi/LockScreenView.swift'
+          b64 = "aW1wb3J0IFN3aWZ0VUkKCnN0cnVjdCBMb2NrU2NyZWVuVmlldzogVmlldyB7CiAgICBARW52aXJvbm1lbnRPYmplY3QgdmFyIGNoYXRWTTogQ2hhdFZpZXdNb2RlbAogICAgQFN0YXRlIHByaXZhdGUgdmFyIHNob3dWb2ljZUNhbGwgPSBmYWxzZQoKICAgIHZhciBib2R5OiBzb21lIFZpZXcgewogICAgICAgIFZTdGFjayhzcGFjaW5nOiAyMCkgewogICAgICAgICAgICBUZXh0KCLkuI7lsI/mmbrnmoTlr7nor50iKQogICAgICAgICAgICAgICAgLmZvbnQoLmxhcmdlVGl0bGUpCiAgICAgICAgICAgICAgICAucGFkZGluZygudG9wLCA2MCkKICAgICAgICAgICAgCiAgICAgICAgICAgIFNwYWNlcigpCiAgICAgICAgICAgIAogICAgICAgICAgICBUZXh0KCLmlrAgVUkg5rWL6K+V54mIIikKICAgICAgICAgICAgICAgIC5mb3JlZ3JvdW5kQ29sb3IoLmdyYXkpCiAgICAgICAgICAgIAogICAgICAgICAgICBTcGFjZXIoKQogICAgICAgICAgICAKICAgICAgICAgICAgLy8g5L+d55WZ6K+t6Z+z6YCa6K+d5oyJ6ZKuCiAgICAgICAgICAgIEJ1dHRvbihhY3Rpb246IHsgc2hvd1ZvaWNlQ2FsbCA9IHRydWUgfSkgewogICAgICAgICAgICAgICAgTGFiZWwoIuivremfs+mAmuivnSIsIHN5c3RlbUltYWdlOiAicGhvbmUuZmlsbCIpCiAgICAgICAgICAgICAgICAgICAgLmZvcmVncm91bmRDb2xvcigud2hpdGUpCiAgICAgICAgICAgICAgICAgICAgLnBhZGRpbmcoKQogICAgICAgICAgICAgICAgICAgIC5iYWNrZ3JvdW5kKENvbG9yLmdyZWVuKQogICAgICAgICAgICAgICAgICAgIC5jb3JuZXJSYWRpdXMoMTIpCiAgICAgICAgICAgIH0KICAgICAgICAgICAgLnBhZGRpbmcoLmJvdHRvbSwgNDApCiAgICAgICAgfQogICAgICAgIC5mdWxsU2NyZWVuQ292ZXIoaXNQcmVzZW50ZWQ6ICRzaG93Vm9pY2VDYWxsKSB7CiAgICAgICAgICAgIEhhbmRzRnJlZUxpdmUyRFZpZXcoY2hhdFZNOiBjaGF0Vk0pCiAgICAgICAgfQogICAgfQp9Cg=="
+          with open(path, 'wb') as f:
+              f.write(base64.b64decode(b64))
+          print("OK Patch 13: minimal new UI")
+          PYEOF
       - name: Patch 9 Widget extension
         run: |
           python3 - <<'PYEOF'
@@ -485,11 +496,20 @@ jobs:
           if [ -z "$APPEX_SRC" ]; then
             APPEX_SRC=$(find ~/Library/Developer/Xcode/DerivedData -name "XiaozhiWidgetExtension.appex" -type d 2>/dev/null | head -1)
           fi
-          # 不把 appex 打进 IPA（复刻 run 25 的意外成功：有 widget target 但 IPA 无 PlugIns，避免 LCSign 安装失败）
           if [ -n "$APPEX_SRC" ]; then
-            echo "Found widget appex: $APPEX_SRC (跳过打包，不复制到 PlugIns/)"
+            echo "Found widget appex: $APPEX_SRC"
+            mkdir -p "Payload/$(basename $APP_PATH)/PlugIns"
+            # 如果还没有嵌入，则复制
+            if [ ! -d "Payload/$(basename $APP_PATH)/PlugIns/XiaozhiWidgetExtension.appex" ]; then
+              cp -R "$APPEX_SRC" "Payload/$(basename $APP_PATH)/PlugIns/"
+              echo "Copied widget to PlugIns/"
+            else
+              echo "Widget already embedded"
+            fi
+            ls -la "Payload/$(basename $APP_PATH)/PlugIns/"
           else
-            echo "INFO: 未找到 widget appex，跳过"
+            echo "ERROR: Widget appex not found in xcarchive or DerivedData"
+            exit 1
           fi
           rm -f xiaozhi-ios-unsigned.ipa
           zip -qr xiaozhi-ios-unsigned.ipa Payload
