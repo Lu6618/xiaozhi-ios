@@ -317,7 +317,6 @@ jobs:
               print("OK Patch 10: added TextEntryButton next to call button")
           PYEOF
 
-
       - name: Patch 9 Widget extension
         run: |
           python3 - <<'PYEOF'
