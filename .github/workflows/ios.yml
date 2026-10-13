@@ -292,7 +292,7 @@ jobs:
               sph = TAB+TAB+sp+" /* Sources */ = {\n"+TAB+TAB+TAB+"isa = PBXSourcesBuildPhase;\n"+TAB+TAB+TAB+"buildActionMask = 2147483647;\n"+TAB+TAB+TAB+"files = (\n"+TAB+TAB+TAB+TAB+bf+" /* XiaozhiWidgets.swift in Sources */,\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"runOnlyForDeploymentPostprocessing = 0;\n"+TAB+TAB+"};\n"
               content = content.replace("/* End PBXSourcesBuildPhase section */", sph + "/* End PBXSourcesBuildPhase section */", 1)
               # Frameworks phase
-              fph = TAB+TAB+fp+" /* Frameworks */ = {\n"+TAB+TAB+TAB+"isa = PBXFrameworksBuildPhase;\n"+TAB+TAB+TAB+"buildActionMask = 2147483647;\n"+TAB+TAB+TAB+"files = (\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"runOnlyForDeploymentPostprocessing = 0;\n"+TAB+TAB+"};\n"
+              fph = TAB+TAB+fp+" /* Frameworks */ = {\n"+TAB+TAB+TAB+"isa = PBXFrameworksBuildPhase;\n"+TAB+TAB+TAB+"buildActionMask = 2147483647;\n"+TAB+TAB+TAB+"files = (\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"runOnlyForDeploymentPostprocessing = 0;\n"+TAB+TAB+TAB+"runOnlyForDeploymentPostprocessing = 0;\n"+TAB+TAB+"};\n"
               content = content.replace("/* End PBXFrameworksBuildPhase section */", fph + "/* End PBXFrameworksBuildPhase section */", 1)
               # Resources phase
               rph = TAB+TAB+rp+" /* Resources */ = {\n"+TAB+TAB+TAB+"isa = PBXResourcesBuildPhase;\n"+TAB+TAB+TAB+"buildActionMask = 2147483647;\n"+TAB+TAB+TAB+"files = (\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"runOnlyForDeploymentPostprocessing = 0;\n"+TAB+TAB+"};\n"
@@ -302,7 +302,7 @@ jobs:
               content = content.replace("/* End PBXNativeTarget section */", tgt + "/* End PBXNativeTarget section */", 1)
               # Build configs
               cfg = TAB+TAB+cd+" /* Debug */ = {\n"+TAB+TAB+TAB+"isa = XCBuildConfiguration;\n"+TAB+TAB+TAB+"buildSettings = {\n"+TAB+TAB+TAB+TAB+"INFOPLIST_FILE = \"xiaozhi/WidgetInfo.plist\";\n"+TAB+TAB+TAB+TAB+"IPHONEOS_DEPLOYMENT_TARGET = 17.6;\n"+TAB+TAB+TAB+TAB+"PRODUCT_BUNDLE_IDENTIFIER = \""+BID+"\";\n"+TAB+TAB+TAB+TAB+"SWIFT_VERSION = 5.0;\n"+TAB+TAB+TAB+TAB+"SKIP_INSTALL = YES;\n"+TAB+TAB+TAB+TAB+"CODE_SIGNING_ALLOWED = NO;\n"+TAB+TAB+TAB+"};\n"+TAB+TAB+TAB+"name = Debug;\n"+TAB+TAB+"};\n"
-              cfg += TAB+TAB+cr+" /* Release */ = {\n"+TAB+TAB+TAB+"isa = XCBuildConfiguration;\n"+TAB+TAB+TAB+"buildSettings = {\n"+TAB+TAB+TAB+TAB+"INFOPLIST_FILE = \"xiaozhi/WidgetInfo.plist\";\n"+TAB+TAB+TAB+TAB+"IPHONEOS_DEPLOYMENT_TARGET = 17.6;\n"+TAB+TAB+TAB+TAB+"PRODUCT_BUNDLE_IDENTIFIER = \""+BID+"\";\n"+TAB+TAB+TAB+TAB+"SWIFT_VERSION = 5.0;\n"+TAB+TAB+TAB+TAB+"SKIP_INSTALL = YES;\n"+TAB+TAB+TAB+TAB+"CODE_SIGNING_ALLOWED = NO;\n"+TAB+TAB+TAB+"};\n"+TAB+TAB+TAB+"name = Release;\n"+TAB+TAB+"};\n"
+              cfg += TAB+TAB+cr+" /* Release */ = {\n"+TAB+TAB+TAB+"isa = XCBuildConfiguration;\n"+TAB+TAB+TAB+"buildSettings = {\n"+TAB+TAB+TAB+TAB+"INFOPLIST_FILE = \"xiaozhi/WidgetInfo.plist\";\n"+TAB+TAB+TAB+TAB+"PRODUCT_BUNDLE_IDENTIFIER = \""+BID+"\";\n"+TAB+TAB+TAB+TAB+"SWIFT_VERSION = 5.0;\n"+TAB+TAB+TAB+TAB+"SKIP_INSTALL = YES;\n"+TAB+TAB+TAB+TAB+"CODE_SIGNING_ALLOWED = NO;\n"+TAB+TAB+TAB+"};\n"+TAB+TAB+TAB+"name = Release;\n"+TAB+TAB+"};\n"
               content = content.replace("/* End XCBuildConfiguration section */", cfg + "/* End XCBuildConfiguration section */", 1)
               clist = TAB+TAB+cl+" /* Build configuration list */ = {\n"+TAB+TAB+TAB+"isa = XCConfigurationList;\n"+TAB+TAB+TAB+"buildConfigurations = (\n"+TAB+TAB+TAB+TAB+cd+" /* Debug */,\n"+TAB+TAB+TAB+TAB+cr+" /* Release */,\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"defaultConfigurationIsVisible = 0;\n"+TAB+TAB+TAB+"defaultConfigurationName = Release;\n"+TAB+TAB+"};\n"
               content = content.replace("/* End XCConfigurationList section */", clist + "/* End XCConfigurationList section */", 1)
@@ -345,10 +345,10 @@ jobs:
             WIDGET_ID=$(grep -B5 'productType = "com.apple.product-type.app-extension"' xiaozhi.xcodeproj/project.pbxproj | grep -oE '[A-F0-9]{24}' | head -1)
           fi
           echo "Widget Target ID: $WIDGET_ID"
-          # 生成包含两个 target 的 scheme
+          # 生成包含两个 target 的 scheme（用 printf 避免引号嵌套被 bash 吃掉）
           WIDGET_ENTRY=""
           if [ -n "$WIDGET_ID" ] && [[ "$WIDGET_ID" != "/*" ]]; then
-            WIDGET_ENTRY="<BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="$WIDGET_ID" BuildableName="XiaozhiWidgetExtension.appex" BlueprintName="XiaozhiWidgetExtension" ReferencedContainer="container:xiaozhi.xcodeproj"></BuildableReference></BuildActionEntry>"
+            WIDGET_ENTRY=$(printf '<BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="%s" BuildableName="XiaozhiWidgetExtension.appex" BlueprintName="XiaozhiWidgetExtension" ReferencedContainer="container:xiaozhi.xcodeproj"></BuildableReference></BuildActionEntry>' "$WIDGET_ID")
           fi
           cat > xiaozhi.xcodeproj/xcshareddata/xcschemes/xiaozhi.xcscheme <<SCHEME_EOF
           <?xml version="1.0" encoding="UTF-8"?>
