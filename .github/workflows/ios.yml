@@ -419,7 +419,11 @@ jobs:
           rm -rf Payload && mkdir -p Payload
           cp -R "$APP_PATH" Payload/
           # 确保 Widget Extension 已嵌入（如果 scheme 构建未自动嵌入，手动复制）
-          APPEX_SRC=$(find build/xiaozhi.xcarchive -name "XiaozhiWidgetExtension.appex" -type d | head -1)
+          # 注意：widget target 设了 SKIP_INSTALL=YES，appex 不会进 xcarchive，要去 DerivedData 找
+          APPEX_SRC=$(find build/xiaozhi.xcarchive -name "XiaozhiWidgetExtension.appex" -type d 2>/dev/null | head -1)
+          if [ -z "$APPEX_SRC" ]; then
+            APPEX_SRC=$(find ~/Library/Developer/Xcode/DerivedData -name "XiaozhiWidgetExtension.appex" -type d 2>/dev/null | head -1)
+          fi
           if [ -n "$APPEX_SRC" ]; then
             echo "Found widget appex: $APPEX_SRC"
             mkdir -p "Payload/$(basename $APP_PATH)/PlugIns"
@@ -432,7 +436,8 @@ jobs:
             fi
             ls -la "Payload/$(basename $APP_PATH)/PlugIns/"
           else
-            echo "WARNING: Widget appex not found in archive"
+            echo "ERROR: Widget appex not found in xcarchive or DerivedData"
+            exit 1
           fi
           rm -f xiaozhi-ios-unsigned.ipa
           zip -qr xiaozhi-ios-unsigned.ipa Payload
