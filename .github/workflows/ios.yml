@@ -485,20 +485,11 @@ jobs:
           if [ -z "$APPEX_SRC" ]; then
             APPEX_SRC=$(find ~/Library/Developer/Xcode/DerivedData -name "XiaozhiWidgetExtension.appex" -type d 2>/dev/null | head -1)
           fi
+          # 不把 appex 打进 IPA（复刻 run 25 的意外成功：有 widget target 但 IPA 无 PlugIns，避免 LCSign 安装失败）
           if [ -n "$APPEX_SRC" ]; then
-            echo "Found widget appex: $APPEX_SRC"
-            mkdir -p "Payload/$(basename $APP_PATH)/PlugIns"
-            # 如果还没有嵌入，则复制
-            if [ ! -d "Payload/$(basename $APP_PATH)/PlugIns/XiaozhiWidgetExtension.appex" ]; then
-              cp -R "$APPEX_SRC" "Payload/$(basename $APP_PATH)/PlugIns/"
-              echo "Copied widget to PlugIns/"
-            else
-              echo "Widget already embedded"
-            fi
-            ls -la "Payload/$(basename $APP_PATH)/PlugIns/"
+            echo "Found widget appex: $APPEX_SRC (跳过打包，不复制到 PlugIns/)"
           else
-            echo "ERROR: Widget appex not found in xcarchive or DerivedData"
-            exit 1
+            echo "INFO: 未找到 widget appex，跳过"
           fi
           rm -f xiaozhi-ios-unsigned.ipa
           zip -qr xiaozhi-ios-unsigned.ipa Payload
