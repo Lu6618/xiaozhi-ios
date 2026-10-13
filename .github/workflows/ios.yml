@@ -442,8 +442,7 @@ jobs:
             fi
             ls -la "Payload/$(basename $APP_PATH)/PlugIns/"
           else
-            echo "ERROR: Widget appex not found in xcarchive or DerivedData"
-            exit 1
+            echo "INFO: 未找到 widget appex（小组件已禁用），跳过嵌入"
           fi
           rm -f xiaozhi-ios-unsigned.ipa
           zip -qr xiaozhi-ios-unsigned.ipa Payload
