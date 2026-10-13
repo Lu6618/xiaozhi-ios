@@ -160,3 +160,295 @@ jobs:
               content = content.replace(old_struct_end, old_struct_end + call_button, 1)
               with open(path, 'w') as f:
                   f.write(content)
+              print("OK Patch 4: added CallEntryButton next to 实时对话")
+
+          # Patch 4d: 移除 ContentView 顶部旧的绿色通话按钮（已移到锁屏页；齿轮/调试入口保留）
+          path = 'xiaozhi/ContentView.swift'
+          with open(path) as f:
+              lines = f.readlines()
+          target = None
+          for i, l in enumerate(lines):
+              if 'phone.circle.fill' in l:
+                  target = i
+                  break
+          if target is None:
+              print("SKIP Patch 4d: old call button not found (already removed)")
+          else:
+              start = target
+              for j in range(target, max(-1, target-6), -1):
+                  if 'NavigationLink' in lines[j] and 'HandsFreeLive2DView' in lines[j]:
+                      start = j
+                      break
+              if start > 0 and '免提模式入口' in lines[start-1]:
+                  start -= 1
+              depth = 0
+              end = None
+              for j in range(start, len(lines)):
+                  depth += lines[j].count('{') - lines[j].count('}')
+                  if depth == 0 and j > start:
+                      end = j
+                      break
+              if end is None:
+                  print("WARN Patch 4d: block end not found, skipped")
+              else:
+                  del lines[start:end+1]
+                  with open(path, 'w') as f:
+                      f.writelines(lines)
+                  print(f"OK Patch 4d: removed old call button (lines {start+1}-{end+1})")
+          print("All patches done (idempotent)")
+          PYEOF
+
+
+      - name: Patch 5-6 Text chat view files
+        run: |
+          python3 - <<'PYEOF'
+          import base64, os
+          # Patch 5: ChatViewModel.sendTextMessage
+          path = 'xiaozhi/ChatViewModel.swift'
+          with open(path) as f: content = f.read()
+          if 'func sendTextMessage(text:' in content:
+              print("SKIP Patch 5: already exists")
+          else:
+              anchor = '    func mcpDidRequestSendFakeUserMessage(text: String) {'
+              assert anchor in content
+              old_b = anchor + "\n        guard let sid = currentSessionId else { return }\n        sendJson([\"session_id\": sid, \"type\": \"text\", \"text\": text])\n    }"
+              new_b = old_b + "\n\n    // Patch 5: text chat send\n    func sendTextMessage(text: String) {\n        guard let sid = currentSessionId else { return }\n        let m = ChatMessage(text: text, type: .sent)\n        DispatchQueue.main.async { self.messageList.append(m) }\n        sendJson([\"session_id\": sid, \"type\": \"text\", \"text\": text])\n    }"
+              content = content.replace(old_b, new_b, 1)
+              with open(path, 'w') as f: f.write(content)
+              print("OK Patch 5")
+          # Patch 6: TextChatView.swift from base64
+          if os.path.exists('xiaozhi/TextChatView.swift'):
+              print("SKIP Patch 6: exists")
+          else:
+              b64 = "Ly8KLy8gIFRleHRDaGF0Vmlldy5zd2lmdAovLyAgeGlhb3poaQovLwovLyAg5paH5a2X5a+56K+d6KeG5Zu+77ya5paH5pys6L6T5YWl5LiO5bCP5pm65a+56K+dCi8vCgppbXBvcnQgU3dpZnRVSQoKc3RydWN0IFRleHRDaGF0VmlldzogVmlldyB7CiAgICBARW52aXJvbm1lbnRPYmplY3QgdmFyIGNoYXRWTTogQ2hhdFZpZXdNb2RlbAogICAgQFN0YXRlIHByaXZhdGUgdmFyIGlucHV0VGV4dCA9ICIiCiAgICBARm9jdXNTdGF0ZSBwcml2YXRlIHZhciBpc0lucHV0Rm9jdXNlZDogQm9vbAoKICAgIHZhciBib2R5OiBzb21lIFZpZXcgewogICAgICAgIFZTdGFjayhzcGFjaW5nOiAwKSB7CiAgICAgICAgICAgIC8vIDEuIOiBiuWkqea2iOaBr+WMuuWfn++8iOWkjeeUqCBNZXNzYWdlUm93Vmlld++8iQogICAgICAgICAgICBTY3JvbGxWaWV3UmVhZGVyIHsgcHJveHkgaW4KICAgICAgICAgICAgICAgIFNjcm9sbFZpZXcgewogICAgICAgICAgICAgICAgICAgIExhenlWU3RhY2soc3BhY2luZzogMTIpIHsKICAgICAgICAgICAgICAgICAgICAgICAgRm9yRWFjaChjaGF0Vk0ubWVzc2FnZUxpc3QpIHsgbWVzc2FnZSBpbgogICAgICAgICAgICAgICAgICAgICAgICAgICAgTWVzc2FnZVJvd1ZpZXcobWVzc2FnZTogbWVzc2FnZSkKICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAuaWQobWVzc2FnZS5pZCkKICAgICAgICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICAucGFkZGluZygpCiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAub25DaGFuZ2Uob2Y6IGNoYXRWTS5tZXNzYWdlTGlzdC5sYXN0Py50ZXh0KSB7IF8gaW4KICAgICAgICAgICAgICAgICAgICBpZiBsZXQgbGFzdElkID0gY2hhdFZNLm1lc3NhZ2VMaXN0Lmxhc3Q/LmlkIHsKICAgICAgICAgICAgICAgICAgICAgICAgd2l0aEFuaW1hdGlvbiguZWFzZU91dChkdXJhdGlvbjogMC4yKSkgewogICAgICAgICAgICAgICAgICAgICAgICAgICAgcHJveHkuc2Nyb2xsVG8obGFzdElkLCBhbmNob3I6IC5ib3R0b20pCiAgICAgICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0KCiAgICAgICAgICAgIC8vIDIuIOW6lemDqOaWh+acrOi+k+WFpeahhgogICAgICAgICAgICBIU3RhY2soc3BhY2luZzogMTIpIHsKICAgICAgICAgICAgICAgIFRleHRGaWVsZCgi6L6T5YWl5raI5oGvLi4uIiwgdGV4dDogJGlucHV0VGV4dCwgYXhpczogLnZlcnRpY2FsKQogICAgICAgICAgICAgICAgICAgIC50ZXh0RmllbGRTdHlsZSgucm91bmRlZEJvcmRlcikKICAgICAgICAgICAgICAgICAgICAuZm9jdXNlZCgkaXNJbnB1dEZvY3VzZWQpCiAgICAgICAgICAgICAgICAgICAgLmxpbmVMaW1pdCgxLi4uNCkKICAgICAgICAgICAgICAgICAgICAub25TdWJtaXQgeyBzZW5kTWVzc2FnZSgpIH0KCiAgICAgICAgICAgICAgICBCdXR0b24oYWN0aW9uOiBzZW5kTWVzc2FnZSkgewogICAgICAgICAgICAgICAgICAgIEltYWdlKHN5c3RlbU5hbWU6ICJwYXBlcnBsYW5lLmZpbGwiKQogICAgICAgICAgICAgICAgICAgICAgICAuZm9yZWdyb3VuZENvbG9yKC53aGl0ZSkKICAgICAgICAgICAgICAgICAgICAgICAgLnBhZGRpbmcoMTApCiAgICAgICAgICAgICAgICAgICAgICAgIC5iYWNrZ3JvdW5kKGlucHV0VGV4dC50cmltbWluZ0NoYXJhY3RlcnMoaW46IC53aGl0ZXNwYWNlc0FuZE5ld2xpbmVzKS5pc0VtcHR5ID8gQ29sb3IuZ3JheSA6IENvbG9yLmJsdWUpCiAgICAgICAgICAgICAgICAgICAgICAgIC5jbGlwU2hhcGUoQ2lyY2xlKCkpCiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICAuZGlzYWJsZWQoaW5wdXRUZXh0LnRyaW1taW5nQ2hhcmFjdGVycyhpbjogLndoaXRlc3BhY2VzQW5kTmV3bGluZXMpLmlzRW1wdHkpCiAgICAgICAgICAgIH0KICAgICAgICAgICAgLnBhZGRpbmcoKQogICAgICAgICAgICAuYmFja2dyb3VuZChDb2xvcihVSUNvbG9yLnN5c3RlbUdyYXk2KS5pZ25vcmVzU2FmZUFyZWEoLmNvbnRhaW5lciwgZWRnZXM6IC5ib3R0b20pKQogICAgICAgIH0KICAgICAgICAubmF2aWdhdGlvblRpdGxlKCLmloflrZflr7nor50iKQogICAgICAgIC5uYXZpZ2F0aW9uQmFyVGl0bGVEaXNwbGF5TW9kZSguaW5saW5lKQogICAgfQoKICAgIHByaXZhdGUgZnVuYyBzZW5kTWVzc2FnZSgpIHsKICAgICAgICBsZXQgdGV4dCA9IGlucHV0VGV4dC50cmltbWluZ0NoYXJhY3RlcnMoaW46IC53aGl0ZXNwYWNlc0FuZE5ld2xpbmVzKQogICAgICAgIGd1YXJkICF0ZXh0LmlzRW1wdHkgZWxzZSB7IHJldHVybiB9CiAgICAgICAgaW5wdXRUZXh0ID0gIiIKICAgICAgICBpc0lucHV0Rm9jdXNlZCA9IGZhbHNlCiAgICAgICAgY2hhdFZNLnNlbmRUZXh0TWVzc2FnZSh0ZXh0OiB0ZXh0KQogICAgfQp9CgojUHJldmlldyB7CiAgICBUZXh0Q2hhdFZpZXcoKQogICAgICAgIC5lbnZpcm9ubWVudE9iamVjdChDaGF0Vmlld01vZGVsKCkpCn0K"
+              with open('xiaozhi/TextChatView.swift', 'wb') as f: f.write(base64.b64decode(b64))
+              print("OK Patch 6: TextChatView.swift")
+          # Patch 7: URL scheme
+          import plistlib
+          pp = 'xiaozhi/Info.plist'
+          with open(pp, 'rb') as f: pl = plistlib.load(f)
+          uts = pl.get('CFBundleURLTypes', [])
+          if not any('xiaozhi' in str(t.get('CFBundleURLSchemes', [])) for t in uts):
+              uts.append({'CFBundleURLSchemes': ['xiaozhi'], 'CFBundleURLName': 'com.lu6618.xiaozhi'})
+              pl['CFBundleURLTypes'] = uts
+              with open(pp, 'wb') as f: plistlib.dump(pl, f)
+              print("OK Patch 7: URL scheme")
+          else: print("SKIP Patch 7")
+          print("Done 5-7")
+          PYEOF
+
+      - name: Patch 8 Deep link handling
+        run: |
+          python3 - <<'PYEOF'
+          path = 'xiaozhi/LockScreenView.swift'
+          with open(path) as f: c = f.read()
+          if 'showVoiceCall' in c:
+              print("SKIP Patch 8")
+          else:
+              old_env = '    @EnvironmentObject var chatVM: ChatViewModel\n'
+              assert old_env in c
+              c = c.replace(old_env, old_env + '    @State private var showVoiceCall = false\n    @State private var showTextChat = false\n', 1)
+              old_r = '            .onReceive(timer) { input in\n                currentDate = input\n            }\n        }'
+              assert old_r in c, "anchor not found"
+              new_r = '            .onReceive(timer) { input in\n                currentDate = input\n            }\n            .onOpenURL { url in\n                if url.scheme == "xiaozhi" {\n                    if url.host == "voice" { showVoiceCall = true }\n                    else if url.host == "text" { showTextChat = true }\n                }\n            }\n            .fullScreenCover(isPresented: $showVoiceCall) {\n                HandsFreeLive2DView(chatVM: chatVM)\n            }\n            .fullScreenCover(isPresented: $showTextChat) {\n                NavigationStack {\n                    TextChatView().environmentObject(chatVM)\n                }\n            }\n        }'
+              c = c.replace(old_r, new_r, 1)
+              with open(path, 'w') as f: f.write(c)
+              print("OK Patch 8: deep links")
+          PYEOF
+
+      - name: Patch 9 Widget extension
+        run: |
+          python3 - <<'PYEOF'
+          import base64, os, uuid
+          if not os.path.exists('xiaozhi/XiaozhiWidgets.swift'):
+              b64 = "Ly8KLy8gIFhpYW96aGlXaWRnZXRzLnN3aWZ0Ci8vICBYaWFvemhpV2lkZ2V0RXh0ZW5zaW9uCi8vCi8vICDlsI/mmbrlsI/nu4Tku7bvvJror63pn7PpgJror50gLyDmloflrZflr7nor53kuIDplK7nm7Tovr4KLy8KCmltcG9ydCBXaWRnZXRLaXQKaW1wb3J0IFN3aWZ0VUkKaW1wb3J0IEFwcEludGVudHMKCi8vIE1BUks6IC0gVGltZWxpbmUgUHJvdmlkZXLvvIjpnZnmgIHvvIzml6DpnIDliLfmlrDvvIkKCnN0cnVjdCBTaW1wbGVQcm92aWRlcjogVGltZWxpbmVQcm92aWRlciB7CiAgICBmdW5jIHBsYWNlaG9sZGVyKGluIGNvbnRleHQ6IENvbnRleHQpIC0+IFNpbXBsZUVudHJ5IHsKICAgICAgICBTaW1wbGVFbnRyeShkYXRlOiBEYXRlKCkpCiAgICB9CiAgICBmdW5jIGdldFNuYXBzaG90KGluIGNvbnRleHQ6IENvbnRleHQsIGNvbXBsZXRpb246IEBlc2NhcGluZyAoU2ltcGxlRW50cnkpIC0+IFZvaWQpIHsKICAgICAgICBjb21wbGV0aW9uKFNpbXBsZUVudHJ5KGRhdGU6IERhdGUoKSkpCiAgICB9CiAgICBmdW5jIGdldFRpbWVsaW5lKGluIGNvbnRleHQ6IENvbnRleHQsIGNvbXBsZXRpb246IEBlc2NhcGluZyAoVGltZWxpbmU8U2ltcGxlRW50cnk+KSAtPiBWb2lkKSB7CiAgICAgICAgLy8g6Z2Z5oCB5bCP57uE5Lu277yM5peg6ZyA5a6a5pe25Yi35pawCiAgICAgICAgbGV0IHRpbWVsaW5lID0gVGltZWxpbmUoZW50cmllczogW1NpbXBsZUVudHJ5KGRhdGU6IERhdGUoKSldLCBwb2xpY3k6IC5uZXZlcikKICAgICAgICBjb21wbGV0aW9uKHRpbWVsaW5lKQogICAgfQp9CgpzdHJ1Y3QgU2ltcGxlRW50cnk6IFRpbWVsaW5lRW50cnkgewogICAgbGV0IGRhdGU6IERhdGUKfQoKLy8gTUFSSzogLSBBcHAgSW50ZW50c++8iOS4gOmUruaJk+W8gOWvueW6lOWKn+iDve+8iQoKc3RydWN0IE9wZW5Wb2ljZUNhbGxJbnRlbnQ6IEFwcEludGVudCB7CiAgICBzdGF0aWMgdmFyIHRpdGxlOiBMb2NhbGl6ZWRTdHJpbmdSZXNvdXJjZSA9ICLor63pn7PpgJror50iCiAgICBzdGF0aWMgdmFyIGRlc2NyaXB0aW9uID0gSW50ZW50RGVzY3JpcHRpb24oIuaJk+W8gOWwj+aZuuivremfs+mAmuivnSIpCgogICAgZnVuYyBwZXJmb3JtKCkgYXN5bmMgdGhyb3dzIC0+IHNvbWUgSW50ZW50UmVzdWx0ICYgT3BlbnNJbnRlbnQgewogICAgICAgIC5yZXN1bHQob3BlbnNJbnRlbnQ6IE9wZW5VUkxJbnRlbnQoVVJMKHN0cmluZzogInhpYW96aGk6Ly92b2ljZSIpISkpCiAgICB9Cn0KCnN0cnVjdCBPcGVuVGV4dENoYXRJbnRlbnQ6IEFwcEludGVudCB7CiAgICBzdGF0aWMgdmFyIHRpdGxlOiBMb2NhbGl6ZWRTdHJpbmdSZXNvdXJjZSA9ICLmloflrZflr7nor50iCiAgICBzdGF0aWMgdmFyIGRlc2NyaXB0aW9uID0gSW50ZW50RGVzY3JpcHRpb24oIuaJk+W8gOWwj+aZuuaWh+Wtl+WvueivnSIpCgogICAgZnVuYyBwZXJmb3JtKCkgYXN5bmMgdGhyb3dzIC0+IHNvbWUgSW50ZW50UmVzdWx0ICYgT3BlbnNJbnRlbnQgewogICAgICAgIC5yZXN1bHQob3BlbnNJbnRlbnQ6IE9wZW5VUkxJbnRlbnQoVVJMKHN0cmluZzogInhpYW96aGk6Ly90ZXh0IikhKSkKICAgIH0KfQoKLy8gTUFSSzogLSDor63pn7PpgJror53lsI/nu4Tku7YKCnN0cnVjdCBWb2ljZUNhbGxXaWRnZXRWaWV3OiBWaWV3IHsKICAgIHZhciBib2R5OiBzb21lIFZpZXcgewogICAgICAgIEJ1dHRvbihpbnRlbnQ6IE9wZW5Wb2ljZUNhbGxJbnRlbnQoKSkgewogICAgICAgICAgICBIU3RhY2soc3BhY2luZzogMTQpIHsKICAgICAgICAgICAgICAgIFpTdGFjayB7CiAgICAgICAgICAgICAgICAgICAgQ2lyY2xlKCkKICAgICAgICAgICAgICAgICAgICAgICAgLmZpbGwoQ29sb3IuZ3JlZW4ub3BhY2l0eSgwLjE1KSkKICAgICAgICAgICAgICAgICAgICAgICAgLmZyYW1lKHdpZHRoOiA1MiwgaGVpZ2h0OiA1MikKICAgICAgICAgICAgICAgICAgICBJbWFnZShzeXN0ZW1OYW1lOiAicGhvbmUuZmlsbCIpCiAgICAgICAgICAgICAgICAgICAgICAgIC5mb250KC5zeXN0ZW0oc2l6ZTogMjIpKQogICAgICAgICAgICAgICAgICAgICAgICAuZm9yZWdyb3VuZENvbG9yKC5ncmVlbikKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIFZTdGFjayhhbGlnbm1lbnQ6IC5sZWFkaW5nLCBzcGFjaW5nOiA0KSB7CiAgICAgICAgICAgICAgICAgICAgVGV4dCgi6K+t6Z+z6YCa6K+dIikKICAgICAgICAgICAgICAgICAgICAgICAgLmZvbnQoLmhlYWRsaW5lKQogICAgICAgICAgICAgICAgICAgICAgICAuZm9yZWdyb3VuZENvbG9yKC5wcmltYXJ5KQogICAgICAgICAgICAgICAgICAgIFRleHQoIueCueWHu+S4juWwj+aZuumAmuivnSIpCiAgICAgICAgICAgICAgICAgICAgICAgIC5mb250KC5jYXB0aW9uKQogICAgICAgICAgICAgICAgICAgICAgICAuZm9yZWdyb3VuZENvbG9yKC5zZWNvbmRhcnkpCiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBTcGFjZXIoKQogICAgICAgICAgICB9CiAgICAgICAgICAgIC5wYWRkaW5nKCkKICAgICAgICB9CiAgICAgICAgLmJ1dHRvblN0eWxlKC5wbGFpbikKICAgIH0KfQoKc3RydWN0IFZvaWNlQ2FsbFdpZGdldDogV2lkZ2V0IHsKICAgIGxldCBraW5kOiBTdHJpbmcgPSAiVm9pY2VDYWxsV2lkZ2V0IgoKICAgIHZhciBib2R5OiBzb21lIFdpZGdldENvbmZpZ3VyYXRpb24gewogICAgICAgIFN0YXRpY0NvbmZpZ3VyYXRpb24oa2luZDoga2luZCwgcHJvdmlkZXI6IFNpbXBsZVByb3ZpZGVyKCkpIHsgZW50cnkgaW4KICAgICAgICAgICAgVm9pY2VDYWxsV2lkZ2V0VmlldygpCiAgICAgICAgICAgICAgICAuY29udGFpbmVyQmFja2dyb3VuZCguZmlsbC50ZXJ0aWFyeSwgZm9yOiAud2lkZ2V0KQogICAgICAgIH0KICAgICAgICAuY29uZmlndXJhdGlvbkRpc3BsYXlOYW1lKCLor63pn7PpgJror50iKQogICAgICAgIC5kZXNjcmlwdGlvbigi5LiA6ZSu5byA5aeL5LiO5bCP5pm655qE6K+t6Z+z6YCa6K+dIikKICAgICAgICAuc3VwcG9ydGVkRmFtaWxpZXMoWy5zeXN0ZW1NZWRpdW1dKQogICAgfQp9CgovLyBNQVJLOiAtIOaWh+Wtl+WvueivneWwj+e7hOS7tgoKc3RydWN0IFRleHRDaGF0V2lkZ2V0VmlldzogVmlldyB7CiAgICB2YXIgYm9keTogc29tZSBWaWV3IHsKICAgICAgICBCdXR0b24oaW50ZW50OiBPcGVuVGV4dENoYXRJbnRlbnQoKSkgewogICAgICAgICAgICBIU3RhY2soc3BhY2luZzogMTQpIHsKICAgICAgICAgICAgICAgIFpTdGFjayB7CiAgICAgICAgICAgICAgICAgICAgQ2lyY2xlKCkKICAgICAgICAgICAgICAgICAgICAgICAgLmZpbGwoQ29sb3IuYmx1ZS5vcGFjaXR5KDAuMTUpKQogICAgICAgICAgICAgICAgICAgICAgICAuZnJhbWUod2lkdGg6IDUyLCBoZWlnaHQ6IDUyKQogICAgICAgICAgICAgICAgICAgIEltYWdlKHN5c3RlbU5hbWU6ICJtZXNzYWdlLmZpbGwiKQogICAgICAgICAgICAgICAgICAgICAgICAuZm9udCguc3lzdGVtKHNpemU6IDIyKSkKICAgICAgICAgICAgICAgICAgICAgICAgLmZvcmVncm91bmRDb2xvciguYmx1ZSkKICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIFZTdGFjayhhbGlnbm1lbnQ6IC5sZWFkaW5nLCBzcGFjaW5nOiA0KSB7CiAgICAgICAgICAgICAgICAgICAgVGV4dCgi5paH5a2X5a+56K+dIikKICAgICAgICAgICAgICAgICAgICAgICAgLmZvbnQoLmhlYWRsaW5lKQogICAgICAgICAgICAgICAgICAgICAgICAuZm9yZWdyb3VuZENvbG9yKC5wcmltYXJ5KQogICAgICAgICAgICAgICAgICAgIFRleHQoIueCueWHu+i+k+WFpeaWh+Wtl+WvueivnSIpCiAgICAgICAgICAgICAgICAgICAgICAgIC5mb250KC5jYXB0aW9uKQogICAgICAgICAgICAgICAgICAgICAgICAuZm9yZWdyb3VuZENvbG9yKC5zZWNvbmRhcnkpCiAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICBTcGFjZXIoKQogICAgICAgICAgICB9CiAgICAgICAgICAgIC5wYWRkaW5nKCkKICAgICAgICB9CiAgICAgICAgLmJ1dHRvblN0eWxlKC5wbGFpbikKICAgIH0KfQoKc3RydWN0IFRleHRDaGF0V2lkZ2V0OiBXaWRnZXQgewogICAgbGV0IGtpbmQ6IFN0cmluZyA9ICJUZXh0Q2hhdFdpZGdldCIKCiAgICB2YXIgYm9keTogc29tZSBXaWRnZXRDb25maWd1cmF0aW9uIHsKICAgICAgICBTdGF0aWNDb25maWd1cmF0aW9uKGtpbmQ6IGtpbmQsIHByb3ZpZGVyOiBTaW1wbGVQcm92aWRlcigpKSB7IGVudHJ5IGluCiAgICAgICAgICAgIFRleHRDaGF0V2lkZ2V0VmlldygpCiAgICAgICAgICAgICAgICAuY29udGFpbmVyQmFja2dyb3VuZCguZmlsbC50ZXJ0aWFyeSwgZm9yOiAud2lkZ2V0KQogICAgICAgIH0KICAgICAgICAuY29uZmlndXJhdGlvbkRpc3BsYXlOYW1lKCLmloflrZflr7nor50iKQogICAgICAgIC5kZXNjcmlwdGlvbigi5LiA6ZSu5byA5aeL5LiO5bCP5pm655qE5paH5a2X5a+56K+dIikKICAgICAgICAuc3VwcG9ydGVkRmFtaWxpZXMoWy5zeXN0ZW1NZWRpdW1dKQogICAgfQp9CgovLyBNQVJLOiAtIFdpZGdldCBCdW5kbGUKCkBtYWluCnN0cnVjdCBYaWFvemhpV2lkZ2V0QnVuZGxlOiBXaWRnZXRCdW5kbGUgewogICAgdmFyIGJvZHk6IHNvbWUgV2lkZ2V0IHsKICAgICAgICBWb2ljZUNhbGxXaWRnZXQoKQogICAgICAgIFRleHRDaGF0V2lkZ2V0KCkKICAgIH0KfQoKLy8gTUFSSzogLSBQcmV2aWV3cwoKI1ByZXZpZXcoYXM6IC5zeXN0ZW1NZWRpdW0pIHsKICAgIFZvaWNlQ2FsbFdpZGdldCgpCn0gdGltZWxpbmU6IHsKICAgIFNpbXBsZUVudHJ5KGRhdGU6IC5ub3cpCn0KCiNQcmV2aWV3KGFzOiAuc3lzdGVtTWVkaXVtKSB7CiAgICBUZXh0Q2hhdFdpZGdldCgpCn0gdGltZWxpbmU6IHsKICAgIFNpbXBsZUVudHJ5KGRhdGU6IC5ub3cpCn0K"
+              with open('xiaozhi/XiaozhiWidgets.swift', 'wb') as f: f.write(base64.b64decode(b64))
+              print("OK 9a")
+          else: print("SKIP 9a")
+          if not os.path.exists('xiaozhi/WidgetInfo.plist'):
+              b64 = "PD94bWwgdmVyc2lvbj0iMS4wIiBlbmNvZGluZz0iVVRGLTgiPz4KPCFET0NUWVBFIHBsaXN0IFBVQkxJQyAiLS8vQXBwbGUvL0RURCBQTElTVCAxLjAvL0VOIiAiaHR0cDovL3d3dy5hcHBsZS5jb20vRFREcy9Qcm9wZXJ0eUxpc3QtMS4wLmR0ZCI+CjxwbGlzdCB2ZXJzaW9uPSIxLjAiPgo8ZGljdD4KCTxrZXk+Q0ZCdW5kbGVEZXZlbG9wbWVudFJlZ2lvbjwva2V5PgoJPHN0cmluZz4kKERFVkVMT1BNRU5UX0xBTkdVQUdFKTwvc3RyaW5nPgoJPGtleT5DRkJ1bmRsZURpc3BsYXlOYW1lPC9rZXk+Cgk8c3RyaW5nPlhpYW96aGlXaWRnZXQ8L3N0cmluZz4KCTxrZXk+Q0ZCdW5kbGVFeGVjdXRhYmxlPC9rZXk+Cgk8c3RyaW5nPiQoRVhFQ1VUQUJMRV9OQU1FKTwvc3RyaW5nPgoJPGtleT5DRkJ1bmRsZUlkZW50aWZpZXI8L2tleT4KCTxzdHJpbmc+JChQUk9EVUNUX0JVTkRMRV9JREVOVElGSUVSKTwvc3RyaW5nPgoJPGtleT5DRkJ1bmRsZUluZm9EaWN0aW9uYXJ5VmVyc2lvbjwva2V5PgoJPHN0cmluZz42LjA8L3N0cmluZz4KCTxrZXk+Q0ZCdW5kbGVOYW1lPC9rZXk+Cgk8c3RyaW5nPiQoUFJPRFVDVF9OQU1FKTwvc3RyaW5nPgoJPGtleT5DRkJ1bmRsZVBhY2thZ2VUeXBlPC9rZXk+Cgk8c3RyaW5nPiQoUFJPRFVDVF9CVU5ETEVfUEFDS0FHRV9UWVBFKTwvc3RyaW5nPgoJPGtleT5DRkJ1bmRsZVNob3J0VmVyc2lvblN0cmluZzwva2V5PgoJPHN0cmluZz4xLjA8L3N0cmluZz4KCTxrZXk+Q0ZCdW5kbGVWZXJzaW9uPC9rZXk+Cgk8c3RyaW5nPjE8L3N0cmluZz4KCTxrZXk+TlNFeHRlbnNpb248L2tleT4KCTxkaWN0PgoJCTxrZXk+TlNFeHRlbnNpb25Qb2ludElkZW50aWZpZXI8L2tleT4KCQk8c3RyaW5nPmNvbS5hcHBsZS53aWRnZXRraXQtZXh0ZW5zaW9uPC9zdHJpbmc+Cgk8L2RpY3Q+CjwvZGljdD4KPC9wbGlzdD4K"
+              with open('xiaozhi/WidgetInfo.plist', 'wb') as f: f.write(base64.b64decode(b64))
+              print("OK 9b")
+          else: print("SKIP 9b")
+          PBX = "xiaozhi.xcodeproj/project.pbxproj"
+          with open(PBX) as f: content = f.read()
+          if 'XiaozhiWidgetExtension' in content:
+              print("SKIP 9c")
+          else:
+              def gu():
+                  return uuid.uuid4().hex[:24].upper()
+              tid = gu(); pr = gu(); sp = gu(); fp = gu(); rp = gu()
+              bf = gu(); fr_sw = gu(); fr_pl = gu(); cl = gu(); cd = gu(); cr = gu()
+              TN = "XiaozhiWidgetExtension"; BID = "com.lu6618.xiaozhi.widget"
+              TAB = "\t"
+              # 使用字符串拼接，避免 f-string
+              fr = TAB+TAB+pr+" /* "+TN+".appex */ = {isa = PBXFileReference; explicitFileType = \"wrapper.app-extension\"; includeInIndex = 0; path = \""+TN+".appex\"; sourceTree = BUILT_PRODUCTS_DIR; };\n"
+              fr += TAB+TAB+fr_sw+" /* XiaozhiWidgets.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XiaozhiWidgets.swift; sourceTree = \"<group>\"; };\n"
+              fr += TAB+TAB+fr_pl+" /* WidgetInfo.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = WidgetInfo.plist; sourceTree = \"<group>\"; };\n"
+              content = content.replace("/* End PBXFileReference section */", fr + "/* End PBXFileReference section */", 1)
+              bfile = TAB+TAB+bf+" /* XiaozhiWidgets.swift in Sources */ = {isa = PBXBuildFile; fileRef = "+fr_sw+" /* XiaozhiWidgets.swift */; };\n"
+              content = content.replace("/* End PBXBuildFile section */", bfile + "/* End PBXBuildFile section */", 1)
+              # Sources phase
+              sph = TAB+TAB+sp+" /* Sources */ = {\n"+TAB+TAB+TAB+"isa = PBXSourcesBuildPhase;\n"+TAB+TAB+TAB+"buildActionMask = 2147483647;\n"+TAB+TAB+TAB+"files = (\n"+TAB+TAB+TAB+TAB+bf+" /* XiaozhiWidgets.swift in Sources */,\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"runOnlyForDeploymentPostprocessing = 0;\n"+TAB+TAB+"};\n"
+              content = content.replace("/* End PBXSourcesBuildPhase section */", sph + "/* End PBXSourcesBuildPhase section */", 1)
+              # Frameworks phase
+              fph = TAB+TAB+fp+" /* Frameworks */ = {\n"+TAB+TAB+TAB+"isa = PBXFrameworksBuildPhase;\n"+TAB+TAB+TAB+"buildActionMask = 2147483647;\n"+TAB+TAB+TAB+"files = (\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"runOnlyForDeploymentPostprocessing = 0;\n"+TAB+TAB+"};\n"
+              content = content.replace("/* End PBXFrameworksBuildPhase section */", fph + "/* End PBXFrameworksBuildPhase section */", 1)
+              # Resources phase
+              rph = TAB+TAB+rp+" /* Resources */ = {\n"+TAB+TAB+TAB+"isa = PBXResourcesBuildPhase;\n"+TAB+TAB+TAB+"buildActionMask = 2147483647;\n"+TAB+TAB+TAB+"files = (\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"runOnlyForDeploymentPostprocessing = 0;\n"+TAB+TAB+"};\n"
+              content = content.replace("/* End PBXResourcesBuildPhase section */", rph + "/* End PBXResourcesBuildPhase section */", 1)
+              # Target
+              tgt = TAB+TAB+tid+" /* "+TN+" */ = {\n"+TAB+TAB+TAB+"isa = PBXNativeTarget;\n"+TAB+TAB+TAB+"buildConfigurationList = "+cl+";\n"+TAB+TAB+TAB+"buildPhases = (\n"+TAB+TAB+TAB+TAB+sp+" /* Sources */,\n"+TAB+TAB+TAB+TAB+fp+" /* Frameworks */,\n"+TAB+TAB+TAB+TAB+rp+" /* Resources */,\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"buildRules = (\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"dependencies = (\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"name = "+TN+";\n"+TAB+TAB+TAB+"productName = "+TN+";\n"+TAB+TAB+TAB+"productReference = "+pr+";\n"+TAB+TAB+TAB+"productType = \"com.apple.product-type.app-extension\";\n"+TAB+TAB+"};\n"
+              content = content.replace("/* End PBXNativeTarget section */", tgt + "/* End PBXNativeTarget section */", 1)
+              # Build configs
+              cfg = TAB+TAB+cd+" /* Debug */ = {\n"+TAB+TAB+TAB+"isa = XCBuildConfiguration;\n"+TAB+TAB+TAB+"buildSettings = {\n"+TAB+TAB+TAB+TAB+"INFOPLIST_FILE = \"xiaozhi/WidgetInfo.plist\";\n"+TAB+TAB+TAB+TAB+"IPHONEOS_DEPLOYMENT_TARGET = 17.6;\n"+TAB+TAB+TAB+TAB+"PRODUCT_BUNDLE_IDENTIFIER = \""+BID+"\";\n"+TAB+TAB+TAB+TAB+"SWIFT_VERSION = 5.0;\n"+TAB+TAB+TAB+TAB+"SKIP_INSTALL = YES;\n"+TAB+TAB+TAB+TAB+"CODE_SIGNING_ALLOWED = NO;\n"+TAB+TAB+TAB+"};\n"+TAB+TAB+TAB+"name = Debug;\n"+TAB+TAB+"};\n"
+              cfg += TAB+TAB+cr+" /* Release */ = {\n"+TAB+TAB+TAB+"isa = XCBuildConfiguration;\n"+TAB+TAB+TAB+"buildSettings = {\n"+TAB+TAB+TAB+TAB+"INFOPLIST_FILE = \"xiaozhi/WidgetInfo.plist\";\n"+TAB+TAB+TAB+TAB+"IPHONEOS_DEPLOYMENT_TARGET = 17.6;\n"+TAB+TAB+TAB+TAB+"PRODUCT_BUNDLE_IDENTIFIER = \""+BID+"\";\n"+TAB+TAB+TAB+TAB+"SWIFT_VERSION = 5.0;\n"+TAB+TAB+TAB+TAB+"SKIP_INSTALL = YES;\n"+TAB+TAB+TAB+TAB+"CODE_SIGNING_ALLOWED = NO;\n"+TAB+TAB+TAB+"};\n"+TAB+TAB+TAB+"name = Release;\n"+TAB+TAB+"};\n"
+              content = content.replace("/* End XCBuildConfiguration section */", cfg + "/* End XCBuildConfiguration section */", 1)
+              clist = TAB+TAB+cl+" /* Build configuration list */ = {\n"+TAB+TAB+TAB+"isa = XCConfigurationList;\n"+TAB+TAB+TAB+"buildConfigurations = (\n"+TAB+TAB+TAB+TAB+cd+" /* Debug */,\n"+TAB+TAB+TAB+TAB+cr+" /* Release */,\n"+TAB+TAB+TAB+");\n"+TAB+TAB+TAB+"defaultConfigurationIsVisible = 0;\n"+TAB+TAB+TAB+"defaultConfigurationName = Release;\n"+TAB+TAB+"};\n"
+              content = content.replace("/* End XCConfigurationList section */", clist + "/* End XCConfigurationList section */", 1)
+              # Add to targets
+              content = content.replace("9B2ECFD02EC86CCA0082B028 /* xiaozhi */,\n\t\t\t);", "9B2ECFD02EC86CCA0082B028 /* xiaozhi */,\n\t\t\t\t"+tid+" /* "+TN+" */,\n\t\t\t);", 1)
+              with open(PBX, "w") as f: f.write(content)
+              print("OK 9c: "+tid)
+          print("Done 9")
+          PYEOF
+
+      - name: Remove YbridOpus.xcframework from project
+        run: |
+          # 删除 pbxproj 里所有 YbridOpus 引用（link phase / embed phase / file reference）
+          for id in 9B2ECFF92EC898F90082B028 9B2ECFFA2EC898F90082B028 9B2ECFF82EC898F90082B028; do
+            sed -i '' "/$id/d" xiaozhi.xcodeproj/project.pbxproj
+          done
+          if grep -q "YbridOpus" xiaozhi.xcodeproj/project.pbxproj; then
+            echo "ERROR: YbridOpus still referenced in pbxproj"
+            grep -n "YbridOpus" xiaozhi.xcodeproj/project.pbxproj
+            exit 1
+          fi
+          echo "YbridOpus fully removed from pbxproj"
+
+      - name: Generate shared scheme
+        run: |
+          mkdir -p xiaozhi.xcodeproj/xcshareddata/xcschemes
+          TARGET_ID=$(grep 'isa = PBXNativeTarget' -B2 xiaozhi.xcodeproj/project.pbxproj | grep -B1 'name = xiaozhi;' | head -1 | awk '{print $1}')
+          # 兼容旧格式：如果上面没找到，用老方法
+          if [ -z "$TARGET_ID" ]; then
+            TARGET_ID=$(grep -B1 'isa = PBXNativeTarget' xiaozhi.xcodeproj/project.pbxproj | head -1 | awk '{print $1}')
+          fi
+          echo "Main Target ID: $TARGET_ID"
+          # 查找 Widget Extension target ID
+          WIDGET_ID=$(grep -A2 'XiaozhiWidgetExtension.*isa = PBXNativeTarget' xiaozhi.xcodeproj/project.pbxproj | head -1 | awk '{print $1}')
+          if [ -z "$WIDGET_ID" ]; then
+            WIDGET_ID=$(grep 'XiaozhiWidgetExtension' xiaozhi.xcodeproj/project.pbxproj | grep 'PBXNativeTarget' | head -1 | awk '{print $1}')
+          fi
+          # 更可靠：直接找 productType 为 app-extension 的 target
+          if [ -z "$WIDGET_ID" ] || [[ "$WIDGET_ID" == "/*" ]]; then
+            WIDGET_ID=$(grep -B5 'productType = "com.apple.product-type.app-extension"' xiaozhi.xcodeproj/project.pbxproj | grep -oE '[A-F0-9]{24}' | head -1)
+          fi
+          echo "Widget Target ID: $WIDGET_ID"
+          # 生成包含两个 target 的 scheme
+          WIDGET_ENTRY=""
+          if [ -n "$WIDGET_ID" ] && [[ "$WIDGET_ID" != "/*" ]]; then
+            WIDGET_ENTRY="<BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES"><BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="$WIDGET_ID" BuildableName="XiaozhiWidgetExtension.appex" BlueprintName="XiaozhiWidgetExtension" ReferencedContainer="container:xiaozhi.xcodeproj"></BuildableReference></BuildActionEntry>"
+          fi
+          cat > xiaozhi.xcodeproj/xcshareddata/xcschemes/xiaozhi.xcscheme <<SCHEME_EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <Scheme LastUpgradeVersion="1600" version="1.7">
+            <BuildAction parallelizeBuildables="YES" buildImplicitDependencies="YES">
+              <BuildActionEntries>
+                <BuildActionEntry buildForTesting="YES" buildForRunning="YES" buildForProfiling="YES" buildForArchiving="YES" buildForAnalyzing="YES">
+                  <BuildableReference BuildableIdentifier="primary" BlueprintIdentifier="$TARGET_ID" BuildableName="xiaozhi.app" BlueprintName="xiaozhi" ReferencedContainer="container:xiaozhi.xcodeproj">
+                  </BuildableReference>
+                </BuildActionEntry>
+                $WIDGET_ENTRY
+              </BuildActionEntries>
+            </BuildAction>
+            <TestAction buildConfiguration="Debug" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" shouldUseLaunchSchemeArgsEnv="YES">
+              <Testables>
+              </Testables>
+            </TestAction>
+            <LaunchAction buildConfiguration="Release" selectedDebuggerIdentifier="Xcode.DebuggerFoundation.Debugger.LLDB" selectedLauncherIdentifier="Xcode.DebuggerFoundation.Launcher.LLDB" launchStyle="0" useCustomWorkingDirectory="NO" ignoresPersistentStateOnLaunch="NO" debugDocumentVersioning="YES" debugServiceExtension="internal" allowLocationSimulation="YES">
+            </LaunchAction>
+            <ProfileAction buildConfiguration="Release" shouldUseLaunchSchemeArgsEnv="YES" savedToolIdentifier="" useCustomWorkingDirectory="NO" debugDocumentVersioning="YES">
+            </ProfileAction>
+            <AnalyzeAction buildConfiguration="Debug">
+            </AnalyzeAction>
+            <ArchiveAction buildConfiguration="Release" revealArchiveInOrganizer="YES">
+            </ArchiveAction>
+          </Scheme>
+          SCHEME_EOF
+          ls -la xiaozhi.xcodeproj/xcshareddata/xcschemes/
+
+      - name: Set display name
+        run: |
+          /usr/libexec/PlistBuddy -c "Set :CFBundleDisplayName 小智" xiaozhi/Info.plist
+          /usr/libexec/PlistBuddy -c "Print :CFBundleDisplayName" xiaozhi/Info.plist
+
+      - name: Archive (unsigned, static opus)
+        run: |
+          xcodebuild -project xiaozhi.xcodeproj \
+            -scheme xiaozhi \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/xiaozhi.xcarchive \
+            PRODUCT_BUNDLE_IDENTIFIER=com.lu6618.xiaozhi \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=minimal \
+            HEADER_SEARCH_PATHS='$(inherited) /tmp/opus-install/include' \
+            LIBRARY_SEARCH_PATHS='$(inherited) /tmp/opus-install/lib' \
+            OTHER_LDFLAGS='$(inherited) -lopus' \
+            archive
+
+      - name: Verify no embedded frameworks
+        run: |
+          APP_PATH=$(find build/xiaozhi.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
+          echo "App: $APP_PATH"
+          if [ -d "$APP_PATH/Frameworks" ]; then
+            echo "WARNING: Frameworks dir exists:"
+            ls -la "$APP_PATH/Frameworks/"
+          else
+            echo "OK: no Frameworks directory (all static)"
+          fi
+          ls -la "$APP_PATH" | head -20
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH=$(find build/xiaozhi.xcarchive/Products/Applications -maxdepth 1 -name "*.app" | head -1)
+          rm -rf Payload && mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          # 确保 Widget Extension 已嵌入（如果 scheme 构建未自动嵌入，手动复制）
+          APPEX_SRC=$(find build/xiaozhi.xcarchive -name "XiaozhiWidgetExtension.appex" -type d | head -1)
+          if [ -n "$APPEX_SRC" ]; then
+            echo "Found widget appex: $APPEX_SRC"
+            mkdir -p "Payload/$(basename $APP_PATH)/PlugIns"
+            # 如果还没有嵌入，则复制
+            if [ ! -d "Payload/$(basename $APP_PATH)/PlugIns/XiaozhiWidgetExtension.appex" ]; then
+              cp -R "$APPEX_SRC" "Payload/$(basename $APP_PATH)/PlugIns/"
+              echo "Copied widget to PlugIns/"
+            else
+              echo "Widget already embedded"
+            fi
+            ls -la "Payload/$(basename $APP_PATH)/PlugIns/"
+          else
+            echo "WARNING: Widget appex not found in archive"
+          fi
+          rm -f xiaozhi-ios-unsigned.ipa
+          zip -qr xiaozhi-ios-unsigned.ipa Payload
+          ls -la xiaozhi-ios-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi-ios-unsigned
+          path: xiaozhi-ios-unsigned.ipa
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="unsigned-${{ github.run_number }}"
+          gh release create "$TAG" \
+            --title "Unsigned IPA #$TAG" \
+            --notes "未签名 IPA，下载后自签安装。" \
+            xiaozhi-ios-unsigned.ipa
