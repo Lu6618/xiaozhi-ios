@@ -229,7 +229,7 @@ jobs:
           with open(pp, 'rb') as f: pl = plistlib.load(f)
           uts = pl.get('CFBundleURLTypes', [])
           if not any('xiaozhi' in str(t.get('CFBundleURLSchemes', [])) for t in uts):
-              uts.append({'CFBundleURLSchemes': ['xiaozhi'], 'CFBundleURLName': 'com.lu6618.xiaozhi'})
+              uts.append({'CFBundleURLSchemes': ['xiaozhi'], 'CFBundleURLName': 'com.lu6618.xiaozhi2'})
               pl['CFBundleURLTypes'] = uts
               with open(pp, 'wb') as f: plistlib.dump(pl, f)
               print("OK Patch 7: URL scheme")
@@ -452,7 +452,7 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=iOS' \
             -archivePath build/xiaozhi.xcarchive \
-            PRODUCT_BUNDLE_IDENTIFIER=com.lu6618.xiaozhi \
+            PRODUCT_BUNDLE_IDENTIFIER=com.lu6618.xiaozhi2 \
             CODE_SIGN_IDENTITY="" \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGNING_ALLOWED=NO \
