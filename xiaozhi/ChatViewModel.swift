@@ -12,7 +12,7 @@ import UIKit
 import AVFoundation
 import CoreLocation
 
-enum AppState {
+enum AppState: Equatable {
     case idle
     case listening
     case speaking

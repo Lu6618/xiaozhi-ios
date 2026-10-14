@@ -35,11 +35,26 @@ class NetworkService {
         let (data, response) = try await URLSession.shared.data(for: request)
         
         if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
-            print("❌ HTTP Error: \(httpResponse.statusCode)")
-            throw URLError(.badServerResponse)
+            let responseText = String(data: data, encoding: .utf8) ?? ""
+            print("❌ HTTP Error: \(httpResponse.statusCode) \(responseText)")
+            throw NetworkServiceError.httpStatus(httpResponse.statusCode, responseText)
         }
         
         return data
+    }
+}
+
+enum NetworkServiceError: LocalizedError {
+    case httpStatus(Int, String)
+    case invalidVisionAddress
+
+    var errorDescription: String? {
+        switch self {
+        case let .httpStatus(code, message):
+            return message.isEmpty ? "服务器返回 HTTP \(code)" : "服务器返回 HTTP \(code)：\(message)"
+        case .invalidVisionAddress:
+            return "视觉服务仍是 127.0.0.1。请在右上角设置中填写手机可访问的服务器地址。"
+        }
     }
 }
 
@@ -158,8 +173,13 @@ class XHSService {
 
 class VisionService {
     static func analyze(base64: String) async throws -> String {
+        let baseURL = AppConfig.BaseURLs.vision
+        guard !baseURL.contains("127.0.0.1"), !baseURL.contains("localhost") else {
+            throw NetworkServiceError.invalidVisionAddress
+        }
+
         let data = try await NetworkService.postRequest(
-            url: "\(AppConfig.BaseURLs.vision)/vision/analyze",
+            url: "\(baseURL)/vision/analyze",
             body: [
                 "image_base64": base64,
                 "prompt": "请用简练的语言描述画面内容，就像你在和朋友对话一样。",

@@ -298,7 +298,7 @@ private struct ConversationMessageRow: View {
                 if !message.text.isEmpty {
                     Text(message.text)
                         .font(.system(size: 16))
-                        .foregroundStyle(message.type == .sent ? .white : .primary)
+                        .foregroundColor(message.type == .sent ? Color.white : Color.primary)
                         .padding(.horizontal, 14)
                         .padding(.vertical, 10)
                         .background(message.type == .sent ? Color.blue : Color(uiColor: .systemGray6))
@@ -339,7 +339,7 @@ private struct ModelSelectorSheet: View {
                                 .fontWeight(.semibold)
                             Spacer()
                         }
-                        .foregroundStyle(settings.currentModel.id == model.id ? .white : .primary)
+                        .foregroundColor(settings.currentModel.id == model.id ? Color.white : Color.primary)
                         .padding(.horizontal, 14)
                         .frame(height: 52)
                         .background(settings.currentModel.id == model.id ? Color.blue : Color(uiColor: .systemGray6))

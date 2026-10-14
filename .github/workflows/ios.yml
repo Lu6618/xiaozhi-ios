@@ -171,6 +171,20 @@ jobs:
           path: build.log
           if-no-files-found: ignore
 
+      - name: Annotate Swift compiler errors
+        if: failure()
+        shell: bash
+        run: |
+          if [ ! -f build.log ]; then exit 0; fi
+          grep -E '\.swift:[0-9]+:[0-9]+: error:' build.log | tail -50 | while IFS= read -r line; do
+            file=$(printf '%s' "$line" | sed -E 's#^.*(/[^:]+\.swift):([0-9]+):([0-9]+): error:.*#\1#')
+            row=$(printf '%s' "$line" | sed -E 's#^.*\.swift:([0-9]+):([0-9]+): error:.*#\1#')
+            col=$(printf '%s' "$line" | sed -E 's#^.*\.swift:([0-9]+):([0-9]+): error:.*#\2#')
+            message=$(printf '%s' "$line" | sed -E 's#^.* error: ##')
+            file=${file#"$GITHUB_WORKSPACE/"}
+            echo "::error file=$file,line=$row,col=$col::$message"
+          done
+
       - name: Publish GitHub Release
         if: github.event_name == 'workflow_dispatch' && inputs.publish_release
         env:
