@@ -363,14 +363,40 @@ class ChatViewModel: ObservableObject {
         let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
 
-        guard let sid = currentSessionId, webSocketManager.isConnected else {
+        guard currentSessionId != nil, webSocketManager.isConnected else {
             appState = .connecting
             Task { await connect() }
             return
         }
 
         messageList.append(ChatMessage(text: content, type: .sent))
-        sendJson(["session_id": sid, "type": "text", "text": content])
+
+        // 小智服务端的完整对话链路是 listen start -> Opus -> listen stop。
+        // 直接发送 type=text 只会被部分服务端识别，因此将键盘文字转成
+        // 不外放的 TTS 音频，复用原版语音对话协议。
+        injectVoiceCommand(text: content, showBubble: true)
+    }
+
+    @MainActor
+    func startRealtimeConversation() {
+        guard currentSessionId != nil, webSocketManager.isConnected else {
+            appState = .connecting
+            Task { await connect() }
+            return
+        }
+
+        setMode(handsFree: true)
+        startAutoListening()
+    }
+
+    @MainActor
+    func stopRealtimeConversation() {
+        if appState == .listening {
+            stopUserSpeech()
+        }
+        isHandsFreeMode = false
+        audioService.stopRecording()
+        appState = .idle
     }
     
     
@@ -433,7 +459,11 @@ class ChatViewModel: ObservableObject {
                 
             } catch {
                 print("Vision Error: \(error)")
-                self.speakLocally(text: "分析失败了，再试一次吧。")
+                if let last = self.messageList.last, last.text.contains("正在识别") {
+                    self.messageList.removeLast()
+                }
+                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                self.speakLocally(text: "图片识别失败：\(reason)")
             }
         }
     }
@@ -689,6 +719,7 @@ extension ChatViewModel: WebSocketManagerDelegate {
             
             if self.isShowBubble {
                 print(">>> 🔇 [STT] 忽略静默指令回显: \(json["text"] ?? "")")
+                self.isShowBubble = false
                 return
             }
             
@@ -986,7 +1017,6 @@ extension ChatViewModel: DouyinManagerDelegate {
             // 恢复状态
             self.isInjectingVoice = false
             self.appState = .connecting // 进入连接状态等待 AI 回复
-            self.isShowBubble = false
         }
     }
     
