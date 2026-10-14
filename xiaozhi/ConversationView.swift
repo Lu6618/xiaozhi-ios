@@ -1,14 +1,23 @@
 import SwiftUI
 
+private enum ConversationUIMode {
+    case text
+    case pushToTalk
+    case voiceCall
+}
+
 struct ConversationView: View {
     @EnvironmentObject private var chatVM: ChatViewModel
     @StateObject private var audioMonitor = AudioVolumeMonitor()
     @StateObject private var settings = Live2DSettings.shared
 
     @State private var messageText = ""
-    @State private var isRealtimeConversation = false
+    @State private var mode: ConversationUIMode = .text
+    @State private var isPressingToTalk = false
     @State private var showModelSelector = false
     @State private var showServiceSettings = false
+    @State private var voiceActivityStartedAt: Date?
+    @State private var lastInterruptionAt = Date.distantPast
     @FocusState private var isComposerFocused: Bool
 
     var body: some View {
@@ -17,8 +26,11 @@ struct ConversationView: View {
 
             VStack(spacing: 0) {
                 header
-                transcript
-                model
+                if mode == .text {
+                    transcript
+                } else {
+                    voiceStage
+                }
                 composer
             }
 
@@ -69,7 +81,7 @@ struct ConversationView: View {
         }
         .onChange(of: chatVM.appState) { state in
             if state == .connectionFailed || state == .awaitingActivation {
-                isRealtimeConversation = false
+                if mode == .voiceCall { mode = .pushToTalk }
             }
         }
         .task {
@@ -172,6 +184,73 @@ struct ConversationView: View {
         .onTapGesture { isComposerFocused = false }
     }
 
+    private var voiceStage: some View {
+        ZStack(alignment: .bottom) {
+            model
+
+            if mode == .pushToTalk {
+                pushToTalkButton
+                    .padding(.bottom, 34)
+            } else {
+                hangUpButton
+                    .padding(.bottom, 34)
+            }
+        }
+        .onChange(of: audioMonitor.volume) { volume in
+            detectVoiceCallInterruption(volume: volume)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var pushToTalkButton: some View {
+        ZStack {
+            Circle()
+                .fill(isPressingToTalk ? Color.blue.opacity(0.18) : Color(uiColor: .systemGray6))
+                .frame(width: 138, height: 138)
+                .scaleEffect(isPressingToTalk ? 1.08 : 1)
+
+            VStack(spacing: 9) {
+                Image(systemName: isPressingToTalk ? "waveform" : "mic.fill")
+                    .font(.system(size: 31, weight: .semibold))
+                Text(isPressingToTalk ? "松开结束" : "按住说话")
+                    .font(.system(size: 17, weight: .bold))
+            }
+            .foregroundStyle(isPressingToTalk ? Color.blue : Color.primary)
+        }
+        .shadow(color: .black.opacity(0.08), radius: 16, y: 6)
+        .animation(.spring(response: 0.25, dampingFraction: 0.75), value: isPressingToTalk)
+        .contentShape(Circle())
+        .gesture(
+            DragGesture(minimumDistance: 0)
+                .onChanged { _ in
+                    guard !isPressingToTalk else { return }
+                    isPressingToTalk = true
+                    chatVM.startUserSpeech()
+                }
+                .onEnded { _ in
+                    guard isPressingToTalk else { return }
+                    isPressingToTalk = false
+                    chatVM.stopUserSpeech()
+                }
+        )
+    }
+
+    private var hangUpButton: some View {
+        Button(action: endVoiceCall) {
+            VStack(spacing: 7) {
+                Image(systemName: "phone.down.fill")
+                    .font(.system(size: 25, weight: .bold))
+                Text("挂断")
+                    .font(.system(size: 13, weight: .semibold))
+            }
+            .foregroundStyle(.white)
+            .frame(width: 76, height: 76)
+            .background(Color.red)
+            .clipShape(Circle())
+            .shadow(color: .red.opacity(0.25), radius: 14, y: 6)
+        }
+    }
+
     private var composer: some View {
         HStack(spacing: 10) {
             Button {
@@ -182,25 +261,44 @@ struct ConversationView: View {
                     .frame(width: 38, height: 38)
             }
 
-            TextField("给小智发消息", text: $messageText, axis: .vertical)
-                .focused($isComposerFocused)
-                .lineLimit(1...4)
-                .submitLabel(.send)
-                .onSubmit(sendMessage)
-
-            if messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Button(action: toggleRecording) {
-                    Image(systemName: isRealtimeConversation ? "stop.fill" : "waveform")
-                        .font(.system(size: 20, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .frame(width: 42, height: 42)
-                        .background(isRealtimeConversation ? Color.red : Color.blue)
-                        .clipShape(Circle())
+            if mode == .text {
+                TextField("给小智发消息", text: $messageText, axis: .vertical)
+                    .focused($isComposerFocused)
+                    .lineLimit(1...4)
+                    .submitLabel(.send)
+                    .onSubmit(sendMessage)
+            } else if mode == .pushToTalk {
+                Button(action: beginVoiceCall) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "phone.fill")
+                        Text("语音通话")
+                            .fontWeight(.semibold)
+                    }
+                    .foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             } else {
+                HStack(spacing: 8) {
+                    Circle().fill(Color.green).frame(width: 8, height: 8)
+                    Text("语音通话中")
+                        .fontWeight(.semibold)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if mode == .text && !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Button(action: sendMessage) {
                     Image(systemName: "arrow.up")
                         .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 42, height: 42)
+                        .background(Color.blue)
+                        .clipShape(Circle())
+                }
+            } else {
+                Button(action: toggleInputMode) {
+                    Image(systemName: mode == .text ? "waveform" : "keyboard")
+                        .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(width: 42, height: 42)
                         .background(Color.blue)
@@ -263,18 +361,66 @@ struct ConversationView: View {
         messageText = ""
     }
 
-    private func toggleRecording() {
-        if isRealtimeConversation {
-            chatVM.stopRealtimeConversation()
-            isRealtimeConversation = false
-        } else {
-            guard chatVM.isConnected else {
-                Task { await chatVM.connect() }
-                return
-            }
+    private func toggleInputMode() {
+        if mode == .text {
             isComposerFocused = false
-            chatVM.startRealtimeConversation()
-            isRealtimeConversation = true
+            mode = .pushToTalk
+        } else {
+            leaveVoiceMode()
+            mode = .text
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                isComposerFocused = true
+            }
+        }
+    }
+
+    private func beginVoiceCall() {
+        guard chatVM.isConnected else {
+            Task { await chatVM.connect() }
+            return
+        }
+        mode = .voiceCall
+        chatVM.startRealtimeConversation()
+    }
+
+    private func endVoiceCall() {
+        chatVM.stopRealtimeConversation()
+        mode = .pushToTalk
+    }
+
+    private func leaveVoiceMode() {
+        if isPressingToTalk {
+            isPressingToTalk = false
+            chatVM.stopUserSpeech()
+        }
+        if mode == .voiceCall {
+            chatVM.stopRealtimeConversation()
+        } else {
+            chatVM.setMode(handsFree: false)
+        }
+    }
+
+    private func detectVoiceCallInterruption(volume: Float) {
+        guard mode == .voiceCall, chatVM.appState == .speaking else {
+            voiceActivityStartedAt = nil
+            return
+        }
+
+        let threshold: Float = 0.16
+        if volume >= threshold {
+            let now = Date()
+            if voiceActivityStartedAt == nil {
+                voiceActivityStartedAt = now
+            }
+            guard let startedAt = voiceActivityStartedAt,
+                  now.timeIntervalSince(startedAt) >= 0.28,
+                  now.timeIntervalSince(lastInterruptionAt) >= 1.2 else { return }
+
+            lastInterruptionAt = now
+            voiceActivityStartedAt = nil
+            chatVM.interruptAssistantForVoiceCall()
+        } else {
+            voiceActivityStartedAt = nil
         }
     }
 }

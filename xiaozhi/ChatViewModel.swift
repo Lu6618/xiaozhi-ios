@@ -398,6 +398,16 @@ class ChatViewModel: ObservableObject {
         audioService.stopRecording()
         appState = .idle
     }
+
+    @MainActor
+    func interruptAssistantForVoiceCall() {
+        guard isHandsFreeMode, appState == .speaking, let sid = currentSessionId else { return }
+
+        audioService.stopPlaying()
+        sendJson(["session_id": sid, "type": "abort"])
+        appState = .idle
+        startAutoListening()
+    }
     
     
     // 自动模式逻辑
@@ -412,7 +422,11 @@ class ChatViewModel: ObservableObject {
     @MainActor
     func pauseAutoListeningForAI() {
         guard isHandsFreeMode else { return }
-        audioService.stopRecording()
+        // 通话时保留麦克风做本地音量检测；onOpusPacket 只会在 listening
+        // 状态上传音频，因此 AI 回复期间不会把环境声发给服务端。
+        if !audioService.isRecording {
+            audioService.startRecording()
+        }
     }
     
     // ----------------------------------------------------------------
