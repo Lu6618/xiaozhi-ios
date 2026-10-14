@@ -31,12 +31,16 @@ struct ConversationView: View {
                 } else {
                     voiceStage
                 }
-                composer
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
 
             if chatVM.isSearching {
                 loadingOverlay
             }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            composer
+                .background(Color.white)
         }
         .fullScreenCover(isPresented: $chatVM.showCamera) {
             CameraView(
@@ -169,7 +173,7 @@ struct ConversationView: View {
                 }
             }
         }
-        .frame(minHeight: 110, maxHeight: 220)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var model: some View {
@@ -318,8 +322,8 @@ struct ConversationView: View {
         }
         .shadow(color: .black.opacity(0.06), radius: 12, y: 4)
         .padding(.horizontal, 18)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
     }
 
     private var loadingOverlay: some View {
