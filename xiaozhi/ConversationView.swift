@@ -6,7 +6,9 @@ struct ConversationView: View {
     @StateObject private var settings = Live2DSettings.shared
 
     @State private var messageText = ""
-    @State private var isRecording = false
+    @State private var isRealtimeConversation = false
+    @State private var showModelSelector = false
+    @State private var showServiceSettings = false
     @FocusState private var isComposerFocused: Bool
 
     var body: some View {
@@ -50,14 +52,24 @@ struct ConversationView: View {
                 }
             }
         }
+        .sheet(isPresented: $showModelSelector) {
+            ModelSelectorSheet(settings: settings)
+                .presentationDetents([.height(280)])
+                .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showServiceSettings) {
+            ServiceSettingsSheet()
+                .presentationDetents([.height(330)])
+                .presentationDragIndicator(.visible)
+        }
         .alert("设备等待激活", isPresented: $chatVM.showActivationAlert) {
             Button("好的") {}
         } message: {
             Text(chatVM.activationMessage)
         }
         .onChange(of: chatVM.appState) { state in
-            if state != .listening {
-                isRecording = false
+            if state == .connectionFailed || state == .awaitingActivation {
+                isRealtimeConversation = false
             }
         }
         .task {
@@ -79,6 +91,35 @@ struct ConversationView: View {
             }
 
             Spacer()
+
+            Button {
+                showModelSelector = true
+            } label: {
+                HStack(spacing: 7) {
+                    Image(systemName: "person.crop.circle")
+                        .font(.system(size: 20, weight: .medium))
+                    Text(settings.currentModel.name)
+                        .font(.system(size: 13, weight: .semibold))
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .foregroundStyle(.primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Color(uiColor: .systemGray6))
+                .clipShape(Capsule())
+            }
+
+            Button {
+                showServiceSettings = true
+            } label: {
+                Image(systemName: "gearshape.fill")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.primary)
+                    .frame(width: 38, height: 38)
+                    .background(Color(uiColor: .systemGray6))
+                    .clipShape(Circle())
+            }
 
             Circle()
                 .fill(statusColor)
@@ -149,11 +190,11 @@ struct ConversationView: View {
 
             if messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 Button(action: toggleRecording) {
-                    Image(systemName: isRecording ? "stop.fill" : "waveform")
+                    Image(systemName: isRealtimeConversation ? "stop.fill" : "waveform")
                         .font(.system(size: 20, weight: .semibold))
                         .foregroundStyle(.white)
                         .frame(width: 42, height: 42)
-                        .background(isRecording ? Color.red : Color.blue)
+                        .background(isRealtimeConversation ? Color.red : Color.blue)
                         .clipShape(Circle())
                 }
             } else {
@@ -223,17 +264,17 @@ struct ConversationView: View {
     }
 
     private func toggleRecording() {
-        if isRecording {
-            chatVM.stopUserSpeech()
-            isRecording = false
+        if isRealtimeConversation {
+            chatVM.stopRealtimeConversation()
+            isRealtimeConversation = false
         } else {
             guard chatVM.isConnected else {
                 Task { await chatVM.connect() }
                 return
             }
             isComposerFocused = false
-            chatVM.startUserSpeech()
-            isRecording = true
+            chatVM.startRealtimeConversation()
+            isRealtimeConversation = true
         }
     }
 }
@@ -268,6 +309,115 @@ private struct ConversationMessageRow: View {
 
             if message.type == .received { Spacer(minLength: 52) }
         }
+    }
+}
+
+private struct ModelSelectorSheet: View {
+    @ObservedObject var settings: Live2DSettings
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("选择人物形象")
+                    .font(.title2.bold())
+                Text("选择后立即切换，并在下次启动时保留。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                ForEach(ALL_MODELS) { model in
+                    Button {
+                        settings.selectModel(model)
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 10) {
+                            Image(systemName: settings.currentModel.id == model.id ? "checkmark.circle.fill" : "person.crop.circle")
+                                .font(.system(size: 20))
+                            Text(model.name)
+                                .fontWeight(.semibold)
+                            Spacer()
+                        }
+                        .foregroundStyle(settings.currentModel.id == model.id ? .white : .primary)
+                        .padding(.horizontal, 14)
+                        .frame(height: 52)
+                        .background(settings.currentModel.id == model.id ? Color.blue : Color(uiColor: .systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                }
+            }
+
+            Spacer()
+        }
+        .padding(22)
+    }
+}
+
+private struct ServiceSettingsSheet: View {
+    @AppStorage(AppConfig.visionBaseURLKey) private var visionBaseURL = ""
+    @Environment(\.dismiss) private var dismiss
+    @State private var draftURL = AppConfig.visionBaseURL
+
+    private var usesLoopback: Bool {
+        draftURL.contains("127.0.0.1") || draftURL.contains("localhost")
+    }
+
+    private var isValidURL: Bool {
+        guard let url = URL(string: draftURL), let scheme = url.scheme else { return false }
+        return (scheme == "http" || scheme == "https") && url.host != nil
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("服务设置")
+                    .font(.title2.bold())
+                Text("图片识别需要部署原项目配套的视觉服务。")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("视觉服务地址")
+                    .font(.headline)
+                TextField("例如 http://192.168.1.20:8005", text: $draftURL)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .keyboardType(.URL)
+                    .padding(12)
+                    .background(Color(uiColor: .systemGray6))
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
+
+                if usesLoopback {
+                    Label("127.0.0.1 指向当前 iPhone，无法连接电脑上的服务。", systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                } else {
+                    Text("接口路径应支持 POST /vision/analyze。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Button {
+                visionBaseURL = draftURL.trimmingCharacters(in: .whitespacesAndNewlines)
+                dismiss()
+            } label: {
+                Text("保存设置")
+                    .fontWeight(.bold)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .foregroundStyle(.white)
+                    .background(Color.blue)
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+            .disabled(!isValidURL || usesLoopback)
+            .opacity((isValidURL && !usesLoopback) ? 1 : 0.45)
+
+            Spacer()
+        }
+        .padding(22)
     }
 }
 
