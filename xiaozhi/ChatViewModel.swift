@@ -357,6 +357,21 @@ class ChatViewModel: ObservableObject {
         
         sendJson(["session_id": sid, "type": "listen", "state": "stop"])
     }
+
+    @MainActor
+    func sendTextMessage(_ text: String) {
+        let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !content.isEmpty else { return }
+
+        guard let sid = currentSessionId, webSocketManager.isConnected else {
+            appState = .connecting
+            Task { await connect() }
+            return
+        }
+
+        messageList.append(ChatMessage(text: content, type: .sent))
+        sendJson(["session_id": sid, "type": "text", "text": content])
+    }
     
     
     // 自动模式逻辑

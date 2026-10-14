@@ -18,8 +18,7 @@ struct xiaozhiApp: App {
     
     var body: some Scene {
         WindowGroup {
-            LockScreenView()
-//            DashboardView()
+            ConversationView()
             .preferredColorScheme(.light)
             .environmentObject(chatViewModel)
         }
