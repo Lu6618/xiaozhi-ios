@@ -1,5 +1,5 @@
 import SwiftUI
-import PhotosUI
+import PhotosUI`r`nimport Combine
 
 private enum ConversationUIMode {
     case text
