@@ -82,7 +82,7 @@ struct ConversationView: View {
         }
         .sheet(isPresented: $showServiceSettings) {
             ServiceSettingsSheet()
-                .presentationDetents([.height(330)])
+                .presentationDetents([.medium, .large])
                 .presentationDragIndicator(.visible)
         }
         .confirmationDialog("清空全部聊天记录？", isPresented: $showClearHistoryConfirmation, titleVisibility: .visible) {
@@ -589,84 +589,99 @@ private struct ModelSelectorSheet: View {
 }
 
 private struct ServiceSettingsSheet: View {
-    @AppStorage(AppConfig.visionBaseURLKey) private var visionBaseURL = ""
     @AppStorage("VoiceInterruptionSensitivity") private var interruptionSensitivity = 1
+    @AppStorage(AppConfig.zhipuModelKey) private var zhipuModel = "glm-4v-flash"
     @Environment(\.dismiss) private var dismiss
-    @State private var draftURL = AppConfig.visionBaseURL
+    @State private var apiKey = AppConfig.zhipuAPIKey
+    @State private var showKey = false
 
-    private var usesLoopback: Bool {
-        draftURL.contains("127.0.0.1") || draftURL.contains("localhost")
-    }
-
-    private var isValidURL: Bool {
-        guard let url = URL(string: draftURL), let scheme = url.scheme else { return false }
-        return (scheme == "http" || scheme == "https") && url.host != nil
+    private var canSave: Bool {
+        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !zhipuModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            VStack(alignment: .leading, spacing: 5) {
-                Text("服务设置")
-                    .font(.title2.bold())
-                Text("图片识别需要部署原项目配套的视觉服务。")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Text("语音打断灵敏度")
-                    .font(.headline)
-                Picker("语音打断灵敏度", selection: $interruptionSensitivity) {
-                    Text("高").tag(0)
-                    Text("中").tag(1)
-                    Text("低").tag(2)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("服务设置")
+                        .font(.title2.bold())
+                    Text("图片识别由智谱视觉大模型直接完成，不再需要电脑运行视觉服务。")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
                 }
-                .pickerStyle(.segmented)
-                Text("灵敏度越高，通话时越容易用说话打断小智。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("视觉服务地址")
-                    .font(.headline)
-                TextField("例如 http://192.168.1.20:8005", text: $draftURL)
-                    .textInputAutocapitalization(.never)
-                    .autocorrectionDisabled()
-                    .keyboardType(.URL)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("智谱 API Key")
+                        .font(.headline)
+                    HStack {
+                        Group {
+                            if showKey {
+                                TextField("填写 BigModel API Key", text: $apiKey)
+                            } else {
+                                SecureField("填写 BigModel API Key", text: $apiKey)
+                            }
+                        }
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+
+                        Button { showKey.toggle() } label: {
+                            Image(systemName: showKey ? "eye.slash" : "eye")
+                        }
+                    }
                     .padding(12)
                     .background(Color(uiColor: .systemGray6))
                     .clipShape(RoundedRectangle(cornerRadius: 12))
 
-                if usesLoopback {
-                    Label("127.0.0.1 指向当前 iPhone，无法连接电脑上的服务。", systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.red)
-                } else {
-                    Text("接口路径应支持 POST /vision/analyze。")
+                    Text("API Key 仅保存在本机 Keychain，不会提交到 GitHub。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-            }
 
-            Button {
-                visionBaseURL = draftURL.trimmingCharacters(in: .whitespacesAndNewlines)
-                dismiss()
-            } label: {
-                Text("保存设置")
-                    .fontWeight(.bold)
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 13)
-                    .foregroundStyle(.white)
-                    .background(Color.blue)
-                    .clipShape(RoundedRectangle(cornerRadius: 14))
-            }
-            .disabled(!isValidURL || usesLoopback)
-            .opacity((isValidURL && !usesLoopback) ? 1 : 0.45)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("视觉模型")
+                        .font(.headline)
+                    TextField("glm-4v-flash", text: $zhipuModel)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .padding(12)
+                        .background(Color(uiColor: .systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Text("默认使用 glm-4v-flash；是否免费以智谱控制台当前规则为准。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
-            Spacer()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("语音打断灵敏度")
+                        .font(.headline)
+                    Picker("语音打断灵敏度", selection: $interruptionSensitivity) {
+                        Text("高").tag(0)
+                        Text("中").tag(1)
+                        Text("低").tag(2)
+                    }
+                    .pickerStyle(.segmented)
+                }
+
+                Button {
+                    let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+                    zhipuModel = zhipuModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    _ = KeychainHelper.save(key: AppConfig.zhipuAPIKeyKey, string: trimmedKey)
+                    dismiss()
+                } label: {
+                    Text("保存设置")
+                        .fontWeight(.bold)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .foregroundStyle(.white)
+                        .background(Color.blue)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
+                }
+                .disabled(!canSave)
+                .opacity(canSave ? 1 : 0.45)
+            }
+            .padding(22)
         }
-        .padding(22)
     }
 }
 

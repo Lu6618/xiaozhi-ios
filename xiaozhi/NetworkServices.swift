@@ -47,6 +47,8 @@ class NetworkService {
 enum NetworkServiceError: LocalizedError {
     case httpStatus(Int, String)
     case invalidVisionAddress
+    case missingZhipuAPIKey
+    case invalidVisionResponse
 
     var errorDescription: String? {
         switch self {
@@ -54,6 +56,10 @@ enum NetworkServiceError: LocalizedError {
             return message.isEmpty ? "服务器返回 HTTP \(code)" : "服务器返回 HTTP \(code)：\(message)"
         case .invalidVisionAddress:
             return "视觉服务仍是 127.0.0.1。请在右上角设置中填写手机可访问的服务器地址。"
+        case .missingZhipuAPIKey:
+            return "请先在右上角设置中填写智谱 API Key。"
+        case .invalidVisionResponse:
+            return "智谱视觉模型返回了无法解析的结果。"
         }
     }
 }
@@ -173,27 +179,42 @@ class XHSService {
 
 class VisionService {
     static func analyze(base64: String) async throws -> String {
-        let baseURL = AppConfig.BaseURLs.vision
-        guard !baseURL.contains("127.0.0.1"), !baseURL.contains("localhost") else {
-            throw NetworkServiceError.invalidVisionAddress
-        }
+        let apiKey = AppConfig.zhipuAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else { throw NetworkServiceError.missingZhipuAPIKey }
+        guard let url = URL(string: AppConfig.zhipuEndpoint) else { throw URLError(.badURL) }
 
-        let data = try await NetworkService.postRequest(
-            url: "\(baseURL)/vision/analyze",
-            body: [
-                "image_base64": base64,
-                "prompt": "请用简练的语言描述画面内容，就像你在和朋友对话一样。",
-                "mode":"soft"
-            ]
-        )
-        
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let result = json["result"] as? String {
-            return result
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": AppConfig.zhipuModel,
+            "stream": false,
+            "messages": [[
+                "role": "user",
+                "content": [
+                    ["type": "text", "text": "请用简练自然的中文描述画面内容。如果图片有文字，请同时提取重要文字。"],
+                    ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64)"]]
+                ]
+            ]]
+        ])
+
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw NetworkServiceError.httpStatus(http.statusCode, message)
         }
-        throw URLError(.cannotParseResponse)
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let choices = json["choices"] as? [[String: Any]],
+              let message = choices.first?["message"] as? [String: Any],
+              let content = message["content"] as? String,
+              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NetworkServiceError.invalidVisionResponse
+        }
+        return content.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    
+
     static func uploadImage(base64: String) async throws -> String {
         let data = try await NetworkService.postRequest(
             url: "\(AppConfig.BaseURLs.vision)/visionupload",

@@ -10,6 +10,18 @@ import Foundation
 struct AppConfig {
     static let localIP = "127.0.0.1:8005" // 本地服务 (高德/中间层/微信)，替换为你自己的服务器地址
     static let visionBaseURLKey = "VisionBaseURL"
+    static let zhipuAPIKeyKey = "com.xiaozhi.vision.zhipu.apiKey"
+    static let zhipuModelKey = "ZhipuVisionModel"
+    static let zhipuEndpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
+
+    static var zhipuAPIKey: String {
+        KeychainHelper.load(key: zhipuAPIKeyKey) ?? ""
+    }
+
+    static var zhipuModel: String {
+        let value = UserDefaults.standard.string(forKey: zhipuModelKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value! : "glm-4v-flash"
+    }
 
     static var visionBaseURL: String {
         let saved = UserDefaults.standard.string(forKey: visionBaseURLKey)?
