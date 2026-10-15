@@ -1,4 +1,5 @@
 import SwiftUI
+import PhotosUI
 
 private enum ConversationUIMode {
     case text
@@ -16,6 +17,11 @@ struct ConversationView: View {
     @State private var isPressingToTalk = false
     @State private var showModelSelector = false
     @State private var showServiceSettings = false
+    @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showClearHistoryConfirmation = false
+    @State private var callStartedAt: Date?
+    @State private var callElapsedSeconds = 0
+    @AppStorage("VoiceInterruptionSensitivity") private var interruptionSensitivity = 1
     @State private var voiceActivityStartedAt: Date?
     @State private var lastInterruptionAt = Date.distantPast
     @FocusState private var isComposerFocused: Bool
@@ -78,6 +84,20 @@ struct ConversationView: View {
                 .presentationDetents([.height(330)])
                 .presentationDragIndicator(.visible)
         }
+        .confirmationDialog("清空全部聊天记录？", isPresented: $showClearHistoryConfirmation, titleVisibility: .visible) {
+            Button("清空", role: .destructive) { chatVM.clearConversationHistory() }
+            Button("取消", role: .cancel) {}
+        }
+        .onChange(of: selectedPhoto) { item in
+            guard let item else { return }
+            Task {
+                if let data = try? await item.loadTransferable(type: Data.self),
+                   let image = UIImage(data: data) {
+                    await MainActor.run { chatVM.processSelectedImage(image) }
+                }
+                await MainActor.run { selectedPhoto = nil }
+            }
+        }
         .alert("设备等待激活", isPresented: $chatVM.showActivationAlert) {
             Button("好的") {}
         } message: {
@@ -126,8 +146,13 @@ struct ConversationView: View {
                 .clipShape(Capsule())
             }
 
-            Button {
-                showServiceSettings = true
+            Menu {
+                Button { showServiceSettings = true } label: {
+                    Label("服务设置", systemImage: "server.rack")
+                }
+                Button(role: .destructive) { showClearHistoryConfirmation = true } label: {
+                    Label("清空聊天记录", systemImage: "trash")
+                }
             } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 16, weight: .semibold))
@@ -159,7 +184,14 @@ struct ConversationView: View {
                     }
 
                     ForEach(chatVM.messageList) { message in
-                        ConversationMessageRow(message: message)
+                        ConversationMessageRow(message: message, onRecognizeText: { image in
+                            Task {
+                                let text = await chatVM.recognizeText(in: image)
+                                await MainActor.run {
+                                    UIPasteboard.general.string = text
+                                }
+                            }
+                        })
                             .id(message.id)
                     }
                 }
@@ -189,9 +221,35 @@ struct ConversationView: View {
     }
 
     private var voiceStage: some View {
-        model
+        ZStack(alignment: .top) {
+            model
+            if mode == .voiceCall {
+                HStack(spacing: 14) {
+                    Label(callDurationText, systemImage: "phone.fill")
+                        .font(.system(size: 14, weight: .semibold, design: .monospaced))
+                    Button {
+                        chatVM.setMicrophoneMuted(!chatVM.isMicrophoneMuted)
+                    } label: {
+                        Image(systemName: chatVM.isMicrophoneMuted ? "mic.slash.fill" : "mic.fill")
+                            .frame(width: 34, height: 34)
+                            .background(.ultraThinMaterial)
+                            .clipShape(Circle())
+                    }
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 8)
+                .background(.thinMaterial)
+                .clipShape(Capsule())
+                .padding(.top, 10)
+            }
+        }
         .onChange(of: audioMonitor.volume) { volume in
             detectVoiceCallInterruption(volume: volume)
+        }
+        .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+            if let started = callStartedAt {
+                callElapsedSeconds = Int(Date().timeIntervalSince(started))
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
@@ -231,7 +289,14 @@ struct ConversationView: View {
     private var longComposerControl: some View {
         if mode == .text {
             HStack(spacing: 8) {
-                Button { chatVM.showCamera = true } label: {
+                Menu {
+                    Button { chatVM.showCamera = true } label: {
+                        Label("拍照", systemImage: "camera")
+                    }
+                    PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                        Label("从相册选择", systemImage: "photo.on.rectangle")
+                    }
+                } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 22, weight: .medium))
                         .frame(width: 36, height: 36)
@@ -370,16 +435,22 @@ struct ConversationView: View {
             return
         }
         mode = .voiceCall
+        callStartedAt = Date()
+        callElapsedSeconds = 0
         chatVM.startRealtimeConversation()
     }
 
     private func endVoiceCall() {
         chatVM.stopRealtimeConversation()
+        callStartedAt = nil
+        callElapsedSeconds = 0
         mode = .pushToTalk
     }
 
     private func switchCallToPushToTalk() {
         chatVM.stopRealtimeConversation()
+        callStartedAt = nil
+        callElapsedSeconds = 0
         mode = .pushToTalk
     }
 
@@ -395,20 +466,27 @@ struct ConversationView: View {
         }
     }
 
+    private var callDurationText: String {
+        String(format: "%02d:%02d", callElapsedSeconds / 60, callElapsedSeconds % 60)
+    }
+
     private func detectVoiceCallInterruption(volume: Float) {
         guard mode == .voiceCall, chatVM.appState == .speaking else {
             voiceActivityStartedAt = nil
             return
         }
 
-        let threshold: Float = 0.16
+        let thresholds: [Float] = [0.10, 0.16, 0.24]
+        let durations: [TimeInterval] = [0.18, 0.28, 0.42]
+        let index = min(max(interruptionSensitivity, 0), 2)
+        let threshold = thresholds[index]
         if volume >= threshold {
             let now = Date()
             if voiceActivityStartedAt == nil {
                 voiceActivityStartedAt = now
             }
             guard let startedAt = voiceActivityStartedAt,
-                  now.timeIntervalSince(startedAt) >= 0.28,
+                  now.timeIntervalSince(startedAt) >= durations[index],
                   now.timeIntervalSince(lastInterruptionAt) >= 1.2 else { return }
 
             lastInterruptionAt = now
@@ -422,6 +500,7 @@ struct ConversationView: View {
 
 private struct ConversationMessageRow: View {
     let message: ChatMessage
+    let onRecognizeText: (UIImage) -> Void
 
     var body: some View {
         HStack {
@@ -434,6 +513,11 @@ private struct ConversationMessageRow: View {
                         .scaledToFit()
                         .frame(maxWidth: 190, maxHeight: 160)
                         .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .contextMenu {
+                            Button { onRecognizeText(image) } label: {
+                                Label("识别并复制文字", systemImage: "text.viewfinder")
+                            }
+                        }
                 }
 
                 if !message.text.isEmpty {
@@ -445,6 +529,14 @@ private struct ConversationMessageRow: View {
                         .background(message.type == .sent ? Color.blue : Color(uiColor: .systemGray6))
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
                         .textSelection(.enabled)
+                        .contextMenu {
+                            Button { UIPasteboard.general.string = message.text } label: {
+                                Label("复制", systemImage: "doc.on.doc")
+                            }
+                            ShareLink(item: message.text) {
+                                Label("分享", systemImage: "square.and.arrow.up")
+                            }
+                        }
                 }
             }
 
@@ -467,29 +559,29 @@ private struct ModelSelectorSheet: View {
                     .foregroundStyle(.secondary)
             }
 
-            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
-                ForEach(ALL_MODELS) { model in
-                    Button {
-                        settings.selectModel(model)
-                        dismiss()
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: settings.currentModel.id == model.id ? "checkmark.circle.fill" : "person.crop.circle")
-                                .font(.system(size: 20))
-                            Text(model.name)
-                                .fontWeight(.semibold)
-                            Spacer()
+            ScrollView(showsIndicators: false) {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 12) {
+                    ForEach(ALL_MODELS) { model in
+                        Button {
+                            settings.selectModel(model)
+                            dismiss()
+                        } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: settings.currentModel.id == model.id ? "checkmark.circle.fill" : "person.crop.circle")
+                                    .font(.system(size: 20))
+                                Text(model.name)
+                                    .fontWeight(.semibold)
+                                Spacer()
+                            }
+                            .foregroundColor(settings.currentModel.id == model.id ? Color.white : Color.primary)
+                            .padding(.horizontal, 14)
+                            .frame(height: 52)
+                            .background(settings.currentModel.id == model.id ? Color.blue : Color(uiColor: .systemGray6))
+                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                         }
-                        .foregroundColor(settings.currentModel.id == model.id ? Color.white : Color.primary)
-                        .padding(.horizontal, 14)
-                        .frame(height: 52)
-                        .background(settings.currentModel.id == model.id ? Color.blue : Color(uiColor: .systemGray6))
-                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
                 }
             }
-
-            Spacer()
         }
         .padding(22)
     }
@@ -497,6 +589,7 @@ private struct ModelSelectorSheet: View {
 
 private struct ServiceSettingsSheet: View {
     @AppStorage(AppConfig.visionBaseURLKey) private var visionBaseURL = ""
+    @AppStorage("VoiceInterruptionSensitivity") private var interruptionSensitivity = 1
     @Environment(\.dismiss) private var dismiss
     @State private var draftURL = AppConfig.visionBaseURL
 
@@ -516,6 +609,20 @@ private struct ServiceSettingsSheet: View {
                     .font(.title2.bold())
                 Text("图片识别需要部署原项目配套的视觉服务。")
                     .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("语音打断灵敏度")
+                    .font(.headline)
+                Picker("语音打断灵敏度", selection: $interruptionSensitivity) {
+                    Text("高").tag(0)
+                    Text("中").tag(1)
+                    Text("低").tag(2)
+                }
+                .pickerStyle(.segmented)
+                Text("灵敏度越高，通话时越容易用说话打断小智。")
+                    .font(.caption)
                     .foregroundStyle(.secondary)
             }
 

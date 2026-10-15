@@ -11,6 +11,7 @@ import Combine
 import UIKit
 import AVFoundation
 import CoreLocation
+import Vision
 
 enum AppState: Equatable {
     case idle
@@ -36,11 +37,14 @@ class ChatViewModel: ObservableObject {
     // MARK: - Published Properties (UI State)
     // ----------------------------------------------------------------
     
-    @Published var messageList: [ChatMessage] = []
+    @Published var messageList: [ChatMessage] = [] {
+        didSet { scheduleHistorySave() }
+    }
     @Published var appState: AppState = .connecting
     @Published var showActivationAlert = false
     @Published var activationMessage = ""
     @Published var isHandsFreeMode: Bool = false
+    @Published var isMicrophoneMuted: Bool = false
     
     // Sheets & Popups
     @Published var activeSheet: ActiveSheet?
@@ -81,6 +85,11 @@ class ChatViewModel: ObservableObject {
     private let localSynthesizer = AVSpeechSynthesizer()
     
     private var currentSessionId: String?
+    private let historyURL: URL = {
+        let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return directory.appendingPathComponent("xiaozhi-chat-history.json")
+    }()
+    private var historySaveTask: Task<Void, Never>?
     private var activationPollingTask: Task<Void, Never>?
     
     // MCP Pending States (等待拍照)
@@ -118,6 +127,7 @@ class ChatViewModel: ObservableObject {
     // ----------------------------------------------------------------
     
     init() {
+        loadHistory()
         // 设置代理
         mcpManager.delegate = self
         webSocketManager.delegate = self
@@ -131,13 +141,68 @@ class ChatViewModel: ObservableObject {
         audioService.onOpusPacket = { [weak self] opusData in
             guard let self = self else { return }
             // print(">>> Audio Packet: \(opusData.count) bytes")
-            if self.appState == .listening || self.isInjectingVoice {
+            if (self.appState == .listening && !self.isMicrophoneMuted) || self.isInjectingVoice {
                 self.webSocketManager.sendAudio(data: opusData)
             }
         }
         
     }
     
+    private func loadHistory() {
+        guard let data = try? Data(contentsOf: historyURL),
+              let messages = try? JSONDecoder().decode([ChatMessage].self, from: data) else { return }
+        messageList = messages
+    }
+
+    private func scheduleHistorySave() {
+        historySaveTask?.cancel()
+        let snapshot = Array(messageList.suffix(100))
+        let url = historyURL
+        historySaveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else { return }
+            do {
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                let data = try JSONEncoder().encode(snapshot)
+                try data.write(to: url, options: .atomic)
+            } catch {
+                print("History save failed: \(error)")
+            }
+        }
+    }
+
+    @MainActor
+    func clearConversationHistory() {
+        historySaveTask?.cancel()
+        messageList.removeAll()
+        try? FileManager.default.removeItem(at: historyURL)
+    }
+
+    @MainActor
+    func processSelectedImage(_ image: UIImage) {
+        guard let data = image.jpegData(compressionQuality: 0.72) else { return }
+        processCapturedImage(base64Str: data.base64EncodedString())
+    }
+
+    func recognizeText(in image: UIImage) async -> String {
+        guard let cgImage = image.cgImage else { return "" }
+        return await withCheckedContinuation { continuation in
+            let request = VNRecognizeTextRequest { request, error in
+                guard error == nil else { continuation.resume(returning: ""); return }
+                let text = (request.results as? [VNRecognizedTextObservation])?
+                    .compactMap { $0.topCandidates(1).first?.string }
+                    .joined(separator: "\n") ?? ""
+                continuation.resume(returning: text)
+            }
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["zh-Hans", "en-US"]
+            DispatchQueue.global(qos: .userInitiated).async {
+                try? VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+            }
+        }
+    }
+
     func setMode(handsFree: Bool) {
         self.isHandsFreeMode = handsFree
         print(">>> 切换模式: \(handsFree ? "免提 (Auto)" : "按键 (Manual)")")
@@ -299,7 +364,7 @@ class ChatViewModel: ObservableObject {
             if self.isSystemSpeaking { return }
             
             // 仅在监听状态发送数据
-            if self.appState == .listening || self.isInjectingVoice {
+            if (self.appState == .listening && !self.isMicrophoneMuted) || self.isInjectingVoice {
                 self.webSocketManager.sendAudio(data: opusData)
             }
         }
@@ -378,6 +443,11 @@ class ChatViewModel: ObservableObject {
     }
 
     @MainActor
+    func setMicrophoneMuted(_ muted: Bool) {
+        isMicrophoneMuted = muted
+    }
+
+    @MainActor
     func startRealtimeConversation() {
         guard currentSessionId != nil, webSocketManager.isConnected else {
             appState = .connecting
@@ -385,6 +455,7 @@ class ChatViewModel: ObservableObject {
             return
         }
 
+        isMicrophoneMuted = false
         setMode(handsFree: true)
         startAutoListening()
     }
@@ -395,6 +466,8 @@ class ChatViewModel: ObservableObject {
             stopUserSpeech()
         }
         isHandsFreeMode = false
+        isMicrophoneMuted = false
+        audioService.stopPlaying()
         audioService.stopRecording()
         appState = .idle
     }
