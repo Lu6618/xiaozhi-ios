@@ -12,7 +12,7 @@ struct ConversationView: View {
     @StateObject private var settings = Live2DSettings.shared
 
     @State private var messageText = ""
-    @State private var mode: ConversationUIMode = .text
+    @State private var mode: ConversationUIMode = .pushToTalk
     @State private var isPressingToTalk = false
     @State private var showModelSelector = false
     @State private var showServiceSettings = false
@@ -202,12 +202,24 @@ struct ConversationView: View {
 
             composerCircleButton(
                 icon: mode == .text ? "mic.fill" : "keyboard",
-                action: mode == .text ? enterPushToTalkMode : returnToTextMode
+                action: {
+                    if mode == .text {
+                        enterPushToTalkMode()
+                    } else {
+                        returnToTextMode()
+                    }
+                }
             )
 
             composerCircleButton(
                 icon: mode == .voiceCall ? "mic.fill" : "phone.fill",
-                action: mode == .voiceCall ? switchCallToPushToTalk : beginVoiceCall
+                action: {
+                    if mode == .voiceCall {
+                        switchCallToPushToTalk()
+                    } else {
+                        beginVoiceCall()
+                    }
+                }
             )
         }
         .padding(.horizontal, 18)

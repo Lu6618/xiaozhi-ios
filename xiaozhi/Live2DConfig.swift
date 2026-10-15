@@ -16,7 +16,10 @@ let ALL_MODELS = [
     ModelInfo(name: "Hiyori", dir: "Hiyori", json: "Hiyori.model3.json"),
     ModelInfo(name: "Haru", dir: "Haru", json: "Haru.model3.json"),
     ModelInfo(name: "Rice", dir: "Rice", json: "Rice.model3.json"),
-    ModelInfo(name: "Mao", dir: "Mao", json: "Mao.model3.json")
+    ModelInfo(name: "Mao", dir: "Mao", json: "Mao.model3.json"),
+    ModelInfo(name: "Mark", dir: "Mark", json: "Mark.model3.json"),
+    ModelInfo(name: "Natori", dir: "Natori", json: "Natori.model3.json"),
+    ModelInfo(name: "Wanko", dir: "Wanko", json: "Wanko.model3.json")
 ]
 
 // 3. 设置管理器 (负责保存和读取)
