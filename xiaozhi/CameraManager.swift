@@ -15,6 +15,7 @@ class CameraManager: NSObject, @unchecked Sendable {
     
     // ✅ 2. 专门用来持有当前的拍照处理器，防止被提前释放
     private var currentProcessor: PhotoCaptureProcessor?
+    private var isCapturing = false
     
     override init() {
         super.init()
@@ -62,6 +63,8 @@ class CameraManager: NSObject, @unchecked Sendable {
     func takePhoto() async -> String? {
         return await withCheckedContinuation { continuation in
             sessionQueue.async {
+                guard !self.isCapturing else { continuation.resume(returning: nil); return }
+                self.isCapturing = true
                 // ✅ 4. 创建一个独立的处理器来处理这次拍照
                 // 这避开了 CameraManager 本身的线程隔离问题
                 let processor = PhotoCaptureProcessor(continuation: continuation)
@@ -82,6 +85,7 @@ class CameraManager: NSObject, @unchecked Sendable {
     fileprivate func photographyDidFinish() {
         sessionQueue.async {
             self.currentProcessor = nil
+            self.isCapturing = false
         }
     }
 }

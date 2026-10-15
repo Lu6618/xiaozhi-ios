@@ -57,7 +57,7 @@ enum NetworkServiceError: LocalizedError {
         case .invalidVisionAddress:
             return "视觉服务仍是 127.0.0.1。请在右上角设置中填写手机可访问的服务器地址。"
         case .missingZhipuAPIKey:
-            return "请先在右上角设置中填写智谱 API Key。"
+            return "请先在服务设置中填写视觉模型 API Key。"
         case .invalidVisionResponse:
             return "智谱视觉模型返回了无法解析的结果。"
         }
@@ -179,9 +179,9 @@ class XHSService {
 
 class VisionService {
     static func analyze(base64: String) async throws -> String {
-        let apiKey = AppConfig.zhipuAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = AppConfig.visionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !apiKey.isEmpty else { throw NetworkServiceError.missingZhipuAPIKey }
-        guard let url = URL(string: AppConfig.zhipuEndpoint) else { throw URLError(.badURL) }
+        guard let url = URL(string: AppConfig.visionEndpoint) else { throw URLError(.badURL) }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -189,7 +189,7 @@ class VisionService {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": AppConfig.zhipuModel,
+            "model": AppConfig.visionModel,
             "stream": false,
             "messages": [[
                 "role": "user",

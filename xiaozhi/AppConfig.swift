@@ -12,6 +12,9 @@ struct AppConfig {
     static let visionBaseURLKey = "VisionBaseURL"
     static let zhipuAPIKeyKey = "com.xiaozhi.vision.zhipu.apiKey"
     static let zhipuModelKey = "ZhipuVisionModel"
+    static let visionEndpointKey = "VisionAIEndpoint"
+    static let visionModelKey = "VisionAIModel"
+    static let visionAPIKeyKey = "com.xiaozhi.vision.apiKey"
     static let zhipuEndpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
     static var zhipuAPIKey: String {
@@ -21,6 +24,20 @@ struct AppConfig {
     static var zhipuModel: String {
         let value = UserDefaults.standard.string(forKey: zhipuModelKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return value?.isEmpty == false ? value! : "glm-4v-flash"
+    }
+
+    static var visionEndpoint: String {
+        let value = UserDefaults.standard.string(forKey: visionEndpointKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value! : zhipuEndpoint
+    }
+
+    static var visionModel: String {
+        let value = UserDefaults.standard.string(forKey: visionModelKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value! : zhipuModel
+    }
+
+    static var visionAPIKey: String {
+        KeychainHelper.load(key: visionAPIKeyKey) ?? zhipuAPIKey
     }
 
     static var visionBaseURL: String {

@@ -18,7 +18,10 @@ struct ConversationView: View {
     @State private var isPressingToTalk = false
     @State private var showModelSelector = false
     @State private var showServiceSettings = false
+    @State private var showImageGeneration = false
     @State private var selectedPhoto: PhotosPickerItem?
+    @State private var showPhotoPicker = false
+    @State private var mediaActionLocked = false
     @State private var showClearHistoryConfirmation = false
     @State private var callStartedAt: Date?
     @State private var callElapsedSeconds = 0
@@ -86,6 +89,10 @@ struct ConversationView: View {
             Button("清空", role: .destructive) { chatVM.clearConversationHistory() }
             Button("取消", role: .cancel) {}
         }
+        .sheet(isPresented: $showImageGeneration) {
+            ImageGenerationSheet()
+        }
+        .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhoto, matching: .images)
         .onChange(of: selectedPhoto) { item in
             guard let item else { return }
             Task {
@@ -285,11 +292,14 @@ struct ConversationView: View {
         if mode == .text {
             HStack(spacing: 8) {
                 Menu {
-                    Button { chatVM.showCamera = true } label: {
+                    Button { openCamera() } label: {
                         Label("拍照", systemImage: "camera")
                     }
-                    PhotosPicker(selection: $selectedPhoto, matching: .images) {
+                    Button { showPhotoPicker = true } label: {
                         Label("从相册选择", systemImage: "photo.on.rectangle")
+                    }
+                    Button { showImageGeneration = true } label: {
+                        Label("AI 生图", systemImage: "wand.and.stars")
                     }
                 } label: {
                     Image(systemName: "plus")
@@ -409,6 +419,16 @@ struct ConversationView: View {
         guard !content.isEmpty else { return }
         chatVM.sendTextMessage(content)
         messageText = ""
+    }
+
+    private func openCamera() {
+        guard !mediaActionLocked else { return }
+        mediaActionLocked = true
+        chatVM.cancelCamera()
+        chatVM.showCamera = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+            mediaActionLocked = false
+        }
     }
 
     private func enterPushToTalkMode() {
@@ -557,14 +577,16 @@ private struct ModelSelectorSheet: View {
 }
 
 private struct ServiceSettingsSheet: View {
-    @AppStorage(AppConfig.zhipuModelKey) private var zhipuModel = "glm-4v-flash"
+    @AppStorage(AppConfig.visionEndpointKey) private var visionEndpoint = AppConfig.zhipuEndpoint
+    @AppStorage(AppConfig.visionModelKey) private var visionModel = "glm-4v-flash"
     @Environment(\.dismiss) private var dismiss
-    @State private var apiKey = AppConfig.zhipuAPIKey
+    @State private var apiKey = AppConfig.visionAPIKey
     @State private var showKey = false
 
     private var canSave: Bool {
         !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !zhipuModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !visionEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+        !visionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -573,20 +595,20 @@ private struct ServiceSettingsSheet: View {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("服务设置")
                         .font(.title2.bold())
-                    Text("图片识别由智谱视觉大模型直接完成，不再需要电脑运行视觉服务。")
+                    Text("图片识别使用你配置的 OpenAI 兼容视觉接口。")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("智谱 API Key")
+                    Text("视觉模型 API Key")
                         .font(.headline)
                     HStack {
                         Group {
                             if showKey {
-                                TextField("填写 BigModel API Key", text: $apiKey)
+                                TextField("填写视觉模型 API Key", text: $apiKey)
                             } else {
-                                SecureField("填写 BigModel API Key", text: $apiKey)
+                                SecureField("填写视觉模型 API Key", text: $apiKey)
                             }
                         }
                         .textInputAutocapitalization(.never)
@@ -608,21 +630,34 @@ private struct ServiceSettingsSheet: View {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("视觉模型")
                         .font(.headline)
-                    TextField("glm-4v-flash", text: $zhipuModel)
+                    TextField("模型名称，例如 glm-4v-flash", text: $visionModel)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .padding(12)
                         .background(Color(uiColor: .systemGray6))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
-                    Text("默认使用 glm-4v-flash；是否免费以智谱控制台当前规则为准。")
+                    Text("支持 OpenAI 兼容的视觉对话接口。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
 
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("视觉接口地址")
+                        .font(.headline)
+                    TextField("https://api.example.com/v1/chat/completions", text: $visionEndpoint)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .keyboardType(.URL)
+                        .padding(12)
+                        .background(Color(uiColor: .systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                }
+
                 Button {
                     let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                    zhipuModel = zhipuModel.trimmingCharacters(in: .whitespacesAndNewlines)
-                    _ = KeychainHelper.save(key: AppConfig.zhipuAPIKeyKey, string: trimmedKey)
+                    visionModel = visionModel.trimmingCharacters(in: .whitespacesAndNewlines)
+                    visionEndpoint = visionEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+                    _ = KeychainHelper.save(key: AppConfig.visionAPIKeyKey, string: trimmedKey)
                     dismiss()
                 } label: {
                     Text("保存设置")

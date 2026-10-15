@@ -16,6 +16,7 @@ struct CameraView: View {
     var onCancel: () -> Void
     
     @State private var isTakingPhoto = false
+    @State private var hasCompleted = false
     
     var body: some View {
         ZStack {
@@ -85,7 +86,9 @@ struct CameraView: View {
     private func takePhotoAction() {
         isTakingPhoto = true
         Task {
-            if let base64 = await cameraManager.takePhoto() {
+            if let base64 = await cameraManager.takePhoto(), !hasCompleted {
+                hasCompleted = true
+                cameraManager.stopSession()
                 // 拍照成功
                 onImageCaptured(base64)
             } else {
