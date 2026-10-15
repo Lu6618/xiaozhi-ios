@@ -22,9 +22,6 @@ struct ConversationView: View {
     @State private var showClearHistoryConfirmation = false
     @State private var callStartedAt: Date?
     @State private var callElapsedSeconds = 0
-    @AppStorage("VoiceInterruptionSensitivity") private var interruptionSensitivity = 1
-    @State private var voiceActivityStartedAt: Date?
-    @State private var lastInterruptionAt = Date.distantPast
     @FocusState private var isComposerFocused: Bool
 
     var body: some View {
@@ -243,9 +240,6 @@ struct ConversationView: View {
                 .clipShape(Capsule())
                 .padding(.top, 10)
             }
-        }
-        .onChange(of: audioMonitor.volume) { volume in
-            detectVoiceCallInterruption(volume: volume)
         }
         .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
             if let started = callStartedAt {
@@ -471,32 +465,6 @@ struct ConversationView: View {
         String(format: "%02d:%02d", callElapsedSeconds / 60, callElapsedSeconds % 60)
     }
 
-    private func detectVoiceCallInterruption(volume: Float) {
-        guard mode == .voiceCall, chatVM.appState == .speaking else {
-            voiceActivityStartedAt = nil
-            return
-        }
-
-        let thresholds: [Float] = [0.10, 0.16, 0.24]
-        let durations: [TimeInterval] = [0.18, 0.28, 0.42]
-        let index = min(max(interruptionSensitivity, 0), 2)
-        let threshold = thresholds[index]
-        if volume >= threshold {
-            let now = Date()
-            if voiceActivityStartedAt == nil {
-                voiceActivityStartedAt = now
-            }
-            guard let startedAt = voiceActivityStartedAt,
-                  now.timeIntervalSince(startedAt) >= durations[index],
-                  now.timeIntervalSince(lastInterruptionAt) >= 1.2 else { return }
-
-            lastInterruptionAt = now
-            voiceActivityStartedAt = nil
-            chatVM.interruptAssistantForVoiceCall()
-        } else {
-            voiceActivityStartedAt = nil
-        }
-    }
 }
 
 private struct ConversationMessageRow: View {
@@ -589,7 +557,6 @@ private struct ModelSelectorSheet: View {
 }
 
 private struct ServiceSettingsSheet: View {
-    @AppStorage("VoiceInterruptionSensitivity") private var interruptionSensitivity = 1
     @AppStorage(AppConfig.zhipuModelKey) private var zhipuModel = "glm-4v-flash"
     @Environment(\.dismiss) private var dismiss
     @State private var apiKey = AppConfig.zhipuAPIKey
@@ -650,17 +617,6 @@ private struct ServiceSettingsSheet: View {
                     Text("默认使用 glm-4v-flash；是否免费以智谱控制台当前规则为准。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("语音打断灵敏度")
-                        .font(.headline)
-                    Picker("语音打断灵敏度", selection: $interruptionSensitivity) {
-                        Text("高").tag(0)
-                        Text("中").tag(1)
-                        Text("低").tag(2)
-                    }
-                    .pickerStyle(.segmented)
                 }
 
                 Button {

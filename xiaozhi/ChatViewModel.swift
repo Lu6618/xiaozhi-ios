@@ -262,15 +262,7 @@ class ChatViewModel: ObservableObject {
                 
                 if let url = URL(string: otaResponse.websocket.url) {
                     webSocketManager.connect(url: url, token: otaResponse.websocket.token, deviceId: macAddress, clientId: uuid)
-                    // ✅ 【新增】连接成功后，在后台静默启动音频引擎
-                    // 这样用户按按钮时，引擎已经是启动状态，就不会卡手势了
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                        print(">>> 🎤 麦克风全时待命模式已启动")
-                        if !self.audioService.isRecording {
-                            self.audioService.startRecording()
-                        }
-                        print(">>> ✅ [Background] 麦克风已就绪，等待用户按键")
-                    }
+                    // 手动模式保持麦克风关闭，按住说话或进入通话时再启动。
                 
                 } else {
                     self.appState = .connectionFailed
@@ -372,11 +364,8 @@ class ChatViewModel: ObservableObject {
         // 3. 停止播放
         audioService.stopPlaying()
         
-        // 4. 确保麦克风开启
-        print(">>> 🎤 [Recover] 检查麦克风状态...")
-        if !audioService.isRecording {
-            audioService.startRecording()
-        }
+        // 4. 手动模式不预热麦克风，避免空闲时持续占用系统录音。
+        audioService.stopRecording()
         
         // 5. 重置状态
         isHandsFreeMode = false
@@ -495,11 +484,8 @@ class ChatViewModel: ObservableObject {
     @MainActor
     func pauseAutoListeningForAI() {
         guard isHandsFreeMode else { return }
-        // 通话时保留麦克风做本地音量检测；onOpusPacket 只会在 listening
-        // 状态上传音频，因此 AI 回复期间不会把环境声发给服务端。
-        if !audioService.isRecording {
-            audioService.startRecording()
-        }
+        // 播放回复期间关闭录音，避免扬声器回声触发服务端 VAD。
+        audioService.stopRecording()
     }
     
     // ----------------------------------------------------------------
@@ -743,11 +729,7 @@ extension ChatViewModel: WebSocketManagerDelegate {
                 }
             } else {
                 self.appState = .idle
-                // 手动模式下，也恢复“麦克风待命”状态
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    print(">>> 🎤 [WS] Re-arming microphone for Manual Mode")
-                    self.audioService.startRecording()
-                }
+                // 手动模式保持录音关闭，只有按住说话时才启用麦克风。
             }
         }
     }
@@ -892,11 +874,7 @@ extension ChatViewModel: WebSocketManagerDelegate {
                     
                     if isLocalSpeaking { return } // 让本地播报继续
                     
-                    // ✅ 【核心修复】AI 说完话后，立刻重新激活麦克风
-                    // 这样下次用户按按钮时，麦克风已经是热启动状态，反应更快
-                    if !self.audioService.isRecording {
-                        self.audioService.startRecording()
-                    }
+                    // 手动模式不预热麦克风；下一次按住说话时再启动。
                     
                     // ✅ 确保恢复录音逻辑正确
                     print(">>> ✅ AI回复完毕，恢复待机/监听")
