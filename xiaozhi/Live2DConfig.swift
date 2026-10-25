@@ -9,7 +9,14 @@ struct ModelInfo: Hashable, Identifiable {
     let name: String      // 显示的名字 (如: "Hiyori")
     let dir: String       // 文件夹名 (如: "Hiyori")
     let json: String      // json文件名 (如: "Hiyori.model3.json")
-    let scale: Float = 1.0  // 模型缩放 (1.0 = 默认;画布单位大的模型需调小)
+    let scale: Float      // 模型缩放 (1.0 = 默认;画布单位大的模型需调小)
+
+    init(name: String, dir: String, json: String, scale: Float = 1.0) {
+        self.name = name
+        self.dir = dir
+        self.json = json
+        self.scale = scale
+    }
 }
 
 // 2. 全局模型列表配置
