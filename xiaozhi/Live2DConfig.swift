@@ -19,7 +19,8 @@ let ALL_MODELS = [
     ModelInfo(name: "Mao", dir: "Mao", json: "Mao.model3.json"),
     ModelInfo(name: "Mark", dir: "Mark", json: "Mark.model3.json"),
     ModelInfo(name: "Natori", dir: "Natori", json: "Natori.model3.json"),
-    ModelInfo(name: "Wanko", dir: "Wanko", json: "Wanko.model3.json")
+    ModelInfo(name: "Wanko", dir: "Wanko", json: "Wanko.model3.json"),
+    ModelInfo(name: "Centaur", dir: "Centaur", json: "Centaur.model3.json")
 ]
 
 // 3. 设置管理器 (负责保存和读取)
