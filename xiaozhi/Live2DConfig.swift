@@ -10,6 +10,7 @@ struct ModelInfo: Hashable, Identifiable {
     let dir: String       // 文件夹名 (如: "Hiyori")
     let json: String      // json文件名 (如: "Hiyori.model3.json")
     let scale: Float = 1.0  // 模型缩放 (1.0 = 默认;画布单位大的模型需调小)
+}
 
 // 2. 全局模型列表配置
 let ALL_MODELS = [
