@@ -84,6 +84,7 @@ struct MessageRowView: View {
 struct Live2DView: UIViewRepresentable {
     var directoryName: String
     var jsonName: String
+    var modelScale: Float = 1.0
     
     @ObservedObject var audioMonitor: AudioVolumeMonitor
     
@@ -99,6 +100,7 @@ struct Live2DView: UIViewRepresentable {
         context.coordinator.managerHandle = handle
         
         loadLive2DModel(handle, "Asset/\(directoryName)", jsonName)
+        live2DSetModelScale(handle, modelScale)
         
         return mtkView
     }

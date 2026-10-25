@@ -15,5 +15,6 @@ void loadLive2DModel(Live2DManagerHandle handle, const char* modelDir, const cha
 void live2DManagerTouchesBegan(Live2DManagerHandle handle);
 void destroyLive2DManager(Live2DManagerHandle handle);
 void live2DSetMouthOpen(Live2DManagerHandle handle, float level);
+void live2DSetModelScale(Live2DManagerHandle handle, float scale);
 
 #endif /* xiaozhi_Bridging_Header_h */

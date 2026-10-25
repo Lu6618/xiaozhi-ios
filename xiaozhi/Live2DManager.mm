@@ -57,6 +57,7 @@ public:
     void onTouchesBegan();
     
     void setMouthOpen(float level);
+    void setModelScale(float scale);
 
 private:
     void releaseModel();
@@ -73,10 +74,15 @@ private:
     std::string _modelDirectory;
     
     float _lipSyncVolume = 0.0f; //存储当前音量 (0.0 ~ 1.0)
+    float _modelScale = 1.0f; //单模型缩放 (画布单位大的模型调小)
 };
 
 void Live2DManagerImpl::setMouthOpen(float level) {
     _lipSyncVolume = level;
+}
+
+void Live2DManagerImpl::setModelScale(float scale) {
+    _modelScale = scale;
 }
 
 Live2DManagerImpl::Live2DManagerImpl() {
@@ -129,7 +135,7 @@ void Live2DManagerImpl::updateViewMatrix(float screenWidth, float screenHeight) 
         scaleY = 1.0f;
     }
     
-    projection.Scale(scaleX * globalZoom, scaleY * globalZoom);
+    projection.Scale(scaleX * globalZoom * _modelScale, scaleY * globalZoom * _modelScale);
     projection.Translate(0.0f, yOffset);
     
     _viewMatrix->SetMatrix(projection.GetArray());
@@ -137,6 +143,7 @@ void Live2DManagerImpl::updateViewMatrix(float screenWidth, float screenHeight) 
 
 void Live2DManagerImpl::loadModel(const std::string& modelDirectoryName, const std::string& modelFileName) {
     releaseModel();
+    _modelScale = 1.0f; // 默认缩放,Swift 侧随后按模型设置
     _modelDirectory = modelDirectoryName;
 
     std::string settingPath = _modelDirectory + "/" + modelFileName;
@@ -283,6 +290,7 @@ void Live2DManagerImpl::releaseModel() {
 
 - (void)dealloc { delete _impl; }
 - (void)loadModel:(NSString*)dir modelFileName:(NSString*)file { _impl->loadModel([dir UTF8String], [file UTF8String]); }
+- (void)setModelScale:(float)scale { _impl->setModelScale(scale); }
 - (void)touchesBegan { _impl->onTouchesBegan(); }
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
 
@@ -342,5 +350,8 @@ extern "C" {
 
     void live2DSetMouthOpen(Live2DManagerHandle handle, float level) {
         [(__bridge Live2DManagerObjC*)handle setMouthOpen:level];
+    }
+    void live2DSetModelScale(Live2DManagerHandle handle, float scale) {
+        [(__bridge Live2DManagerObjC*)handle setModelScale:scale];
     }
 }

@@ -9,7 +9,7 @@ struct ModelInfo: Hashable, Identifiable {
     let name: String      // 显示的名字 (如: "Hiyori")
     let dir: String       // 文件夹名 (如: "Hiyori")
     let json: String      // json文件名 (如: "Hiyori.model3.json")
-}
+    let scale: Float = 1.0  // 模型缩放 (1.0 = 默认;画布单位大的模型需调小)
 
 // 2. 全局模型列表配置
 let ALL_MODELS = [
@@ -20,7 +20,7 @@ let ALL_MODELS = [
     ModelInfo(name: "Mark", dir: "Mark", json: "Mark.model3.json"),
     ModelInfo(name: "Natori", dir: "Natori", json: "Natori.model3.json"),
     ModelInfo(name: "Wanko", dir: "Wanko", json: "Wanko.model3.json"),
-    ModelInfo(name: "Centaur", dir: "Centaur", json: "Centaur.model3.json")
+    ModelInfo(name: "Centaur", dir: "Centaur", json: "Centaur.model3.json", scale: 0.07)
 ]
 
 // 3. 设置管理器 (负责保存和读取)
