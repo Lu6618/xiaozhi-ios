@@ -85,6 +85,12 @@ class ChatViewModel: ObservableObject {
     private let localSynthesizer = AVSpeechSynthesizer()
     
     private var currentSessionId: String?
+    
+    // 断线缓存语音:未连接时按下说话,先本地录音攒包,连上后补发
+    private var isBufferingVoice = false
+    private var pendingVoicePackets: [Data] = []
+    private var pendingVoiceFlush = false
+    private var pendingVoiceDate: Date?
     private let historyURL: URL = {
         let directory = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return directory.appendingPathComponent("xiaozhi-chat-history.json")
@@ -141,6 +147,15 @@ class ChatViewModel: ObservableObject {
         audioService.onOpusPacket = { [weak self] opusData in
             guard let self = self else { return }
             // print(">>> Audio Packet: \(opusData.count) bytes")
+            if self.isBufferingVoice {
+                // 断线缓存:录音包先存本地,连上后补发 (主队列追加,保证顺序且无竞态)
+                DispatchQueue.main.async {
+                    if self.isBufferingVoice && self.pendingVoicePackets.count < 1500 {
+                        self.pendingVoicePackets.append(opusData)
+                    }
+                }
+                return
+            }
             if (self.appState == .listening && !self.isMicrophoneMuted) || self.isInjectingVoice {
                 self.webSocketManager.sendAudio(data: opusData)
             }
@@ -286,6 +301,11 @@ class ChatViewModel: ObservableObject {
         audioService.stopPlaying()
         currentSessionId = nil
         appState = .idle
+        // 断线缓存语音一并丢弃
+        isBufferingVoice = false
+        pendingVoiceFlush = false
+        pendingVoicePackets.removeAll()
+        pendingVoiceDate = nil
         stopPollingForActivation()
     }
 
@@ -355,6 +375,16 @@ class ChatViewModel: ObservableObject {
             guard let self = self else { return }
             if self.isSystemSpeaking { return }
             
+            if self.isBufferingVoice {
+                // 断线缓存:录音包先存本地,连上后补发 (主队列追加,保证顺序且无竞态)
+                DispatchQueue.main.async {
+                    if self.isBufferingVoice && self.pendingVoicePackets.count < 1500 {
+                        self.pendingVoicePackets.append(opusData)
+                    }
+                }
+                return
+            }
+            
             // 仅在监听状态发送数据
             if (self.appState == .listening && !self.isMicrophoneMuted) || self.isInjectingVoice {
                 self.webSocketManager.sendAudio(data: opusData)
@@ -374,34 +404,51 @@ class ChatViewModel: ObservableObject {
     
     @MainActor
     func startUserSpeech() {
-        // 【核心修复】如果当前没有 SessionID，说明连接是假的或断了，立刻触发重连
-        guard let sid = currentSessionId else {
-            print("⚠️ [Speech] 点击了说话，但没有 SessionID，触发重连...")
-            appState = .connecting
-            Task { await connect() }
+        // 已连接:原逻辑 (先清掉旧的断线缓存,避免旧包混入实时流)
+        if let sid = currentSessionId, webSocketManager.isConnected {
+            isBufferingVoice = false
+            pendingVoiceFlush = false
+            pendingVoicePackets.removeAll()
+            pendingVoiceDate = nil
+            
+            // UI 增加 "..."
+            messageList.append(ChatMessage(text: "...", type: .sent))
+            
+            appState = .listening
+            if !audioService.isRecording {
+                audioService.startRecording()
+            }
+            
+            sendJson(["session_id": sid, "type": "listen", "state": "start", "mode": "manual"])
             return
         }
         
-        // 无论如何先连接
-        if !webSocketManager.isConnected {
-            Task { await connect() }
-            return
-        }
-        
-        // UI 增加 "..."
+        // 未连接:不等重连,先本地录音攒包,后台重连;连上后补发,回复随后到
+        print("⚠️ [Speech] 未连接,先本地录音攒包,连上后补发...")
         messageList.append(ChatMessage(text: "...", type: .sent))
-        
-        appState = .listening
+        pendingVoicePackets.removeAll()
+        pendingVoiceFlush = false
+        pendingVoiceDate = nil
+        isBufferingVoice = true
+        appState = .connecting
         if !audioService.isRecording {
             audioService.startRecording()
         }
-        
-        sendJson(["session_id": sid, "type": "listen", "state": "start", "mode": "manual"])
+        Task { await connect() }
     }
     
     
     @MainActor
     func stopUserSpeech() {
+        // 正在断线攒包:停录,标记待补发 (isBufferingVoice 先不清,让在途的包安全落袋,补发时再清)
+        if isBufferingVoice {
+            print(">>> 🛑 [Speech] 断线攒包结束,待连上后补发...")
+            audioService.stopRecording()
+            pendingVoiceFlush = true
+            pendingVoiceDate = Date()
+            return
+        }
+        
         guard appState == .listening, let sid = currentSessionId else { return }
         
         print(">>> 🛑 [Speech] Stopping recording...")
@@ -730,6 +777,40 @@ extension ChatViewModel: WebSocketManagerDelegate {
             } else {
                 self.appState = .idle
                 // 手动模式保持录音关闭，只有按住说话时才启用麦克风。
+            }
+            
+            // 断线缓存语音补发 (手动模式才有攒包,免提模式不受影响)
+            if !self.isHandsFreeMode {
+                if self.isBufferingVoice {
+                    // 还按着:先发已攒的包,再切回实时流 (hello 刚停过录音,补发完再重开,避免在途包被吞)
+                    let buffered = self.pendingVoicePackets
+                    self.pendingVoicePackets.removeAll()
+                    self.pendingVoiceFlush = false
+                    self.pendingVoiceDate = nil
+                    self.isBufferingVoice = false
+                    self.sendJson(["session_id": sessionId, "type": "listen", "state": "start", "mode": "manual"])
+                    for packet in buffered {
+                        self.webSocketManager.sendAudio(data: packet)
+                    }
+                    self.appState = .listening
+                    self.audioService.startRecording()
+                } else if self.pendingVoiceFlush {
+                    // 已松开:整段补发 (120 秒内的才发,过期丢弃,避免旧语音突然回过来)
+                    let buffered = self.pendingVoicePackets
+                    self.pendingVoicePackets.removeAll()
+                    self.pendingVoiceFlush = false
+                    let age = self.pendingVoiceDate.map { Date().timeIntervalSince($0) } ?? 0
+                    self.pendingVoiceDate = nil
+                    self.isBufferingVoice = false
+                    if age < 120 {
+                        self.sendJson(["session_id": sessionId, "type": "listen", "state": "start", "mode": "manual"])
+                        for packet in buffered {
+                            self.webSocketManager.sendAudio(data: packet)
+                        }
+                        self.sendJson(["session_id": sessionId, "type": "listen", "state": "stop"])
+                        self.appState = .idle
+                    }
+                }
             }
         }
     }
