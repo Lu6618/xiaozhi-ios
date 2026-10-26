@@ -22,12 +22,6 @@ struct ModelInfo: Hashable, Identifiable {
 // 2. 全局模型列表配置
 let ALL_MODELS = [
     ModelInfo(name: "Hiyori", dir: "Hiyori", json: "Hiyori.model3.json"),
-    ModelInfo(name: "Haru", dir: "Haru", json: "Haru.model3.json"),
-    ModelInfo(name: "Rice", dir: "Rice", json: "Rice.model3.json"),
-    ModelInfo(name: "Mao", dir: "Mao", json: "Mao.model3.json"),
-    ModelInfo(name: "Mark", dir: "Mark", json: "Mark.model3.json"),
-    ModelInfo(name: "Natori", dir: "Natori", json: "Natori.model3.json"),
-    ModelInfo(name: "Wanko", dir: "Wanko", json: "Wanko.model3.json"),
     ModelInfo(name: "Centaur", dir: "Centaur", json: "Centaur.model3.json", scale: 0.07)
 ]
 
