@@ -5,6 +5,7 @@ struct HandsFreeLive2DView: View {
 //    @StateObject private var chatVM = ChatViewModel()
     @ObservedObject var chatVM: ChatViewModel
     @StateObject private var audioMonitor = AudioVolumeMonitor()
+    @StateObject private var live2DController = Live2DController()
     
     // 用于返回上一页
     @Environment(\.presentationMode) var presentationMode
@@ -26,11 +27,13 @@ struct HandsFreeLive2DView: View {
                 directoryName: settings.currentModel.dir,
                 jsonName: settings.currentModel.json,
                 modelScale: settings.currentModel.scale,
+                controller: live2DController,
                 audioMonitor: audioMonitor
             )
             .ignoresSafeArea()
             .offset(y: 60)
             .id(settings.currentModel.dir)
+            .live2DInteraction(controller: live2DController)
             
             // 2. 界面层
             VStack {

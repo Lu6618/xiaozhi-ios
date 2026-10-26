@@ -58,6 +58,8 @@ public:
     
     void setMouthOpen(float level);
     void setModelScale(float scale);
+    void setLook(float x, float y);
+    void playSpecial();
 
 private:
     void releaseModel();
@@ -75,6 +77,10 @@ private:
     
     float _lipSyncVolume = 0.0f; //存储当前音量 (0.0 ~ 1.0)
     float _modelScale = 1.0f; //单模型缩放 (画布单位大的模型调小)
+    float _lookTargetX = 0.0f; //视线目标 (-1 ~ 1)
+    float _lookTargetY = 0.0f;
+    float _lookX = 0.0f; //当前视线 (每帧向目标平滑靠近)
+    float _lookY = 0.0f;
 };
 
 void Live2DManagerImpl::setMouthOpen(float level) {
@@ -83,6 +89,30 @@ void Live2DManagerImpl::setMouthOpen(float level) {
 
 void Live2DManagerImpl::setModelScale(float scale) {
     _modelScale = scale;
+}
+
+void Live2DManagerImpl::setLook(float x, float y) {
+    if (x < -1.0f) x = -1.0f;
+    if (x > 1.0f) x = 1.0f;
+    if (y < -1.0f) y = -1.0f;
+    if (y > 1.0f) y = 1.0f;
+    _lookTargetX = x;
+    _lookTargetY = y;
+}
+
+void Live2DManagerImpl::playSpecial() {
+    if (!_modelSetting) return;
+    int32_t tapCount = _modelSetting->GetMotionCount("TapBody");
+    if (tapCount > 1) {
+        startMotion("TapBody", tapCount - 1);
+    } else {
+        int32_t idleCount = _modelSetting->GetMotionCount("Idle");
+        if (idleCount > 1) {
+            startMotion("Idle", arc4random() % idleCount);
+        } else if (tapCount == 1) {
+            startMotion("TapBody", 0);
+        }
+    }
 }
 
 Live2DManagerImpl::Live2DManagerImpl() {
@@ -209,6 +239,20 @@ void Live2DManagerImpl::onUpdate(float deltaTime) {
     // ✅ 应用口型同步
     _model->AddParameterValue(mouthOpenId, _lipSyncVolume, 0.8f);
     
+    // ✅ 视线跟随:向目标平滑靠近,叠加到动作的头/眼参数上 (静止时不影响待机动作)
+    float lookSpeed = deltaTime * 10.0f;
+    if (lookSpeed > 1.0f) lookSpeed = 1.0f;
+    _lookX += (_lookTargetX - _lookX) * lookSpeed;
+    _lookY += (_lookTargetY - _lookY) * lookSpeed;
+    const CubismId* angleXId = CubismFramework::GetIdManager()->GetId("ParamAngleX");
+    const CubismId* angleYId = CubismFramework::GetIdManager()->GetId("ParamAngleY");
+    const CubismId* eyeBallXId = CubismFramework::GetIdManager()->GetId("ParamEyeBallX");
+    const CubismId* eyeBallYId = CubismFramework::GetIdManager()->GetId("ParamEyeBallY");
+    _model->AddParameterValue(angleXId, _lookX * 30.0f, 1.0f);
+    _model->AddParameterValue(angleYId, _lookY * 30.0f, 1.0f);
+    _model->AddParameterValue(eyeBallXId, _lookX, 1.0f);
+    _model->AddParameterValue(eyeBallYId, _lookY, 1.0f);
+    
     _model->Update();
     
     if (IsFinished()) {
@@ -291,6 +335,8 @@ void Live2DManagerImpl::releaseModel() {
 - (void)dealloc { delete _impl; }
 - (void)loadModel:(NSString*)dir modelFileName:(NSString*)file { _impl->loadModel([dir UTF8String], [file UTF8String]); }
 - (void)setModelScale:(float)scale { _impl->setModelScale(scale); }
+- (void)setLook:(float)x y:(float)y { _impl->setLook(x, y); }
+- (void)playSpecial { _impl->playSpecial(); }
 - (void)touchesBegan { _impl->onTouchesBegan(); }
 - (void)mtkView:(MTKView *)view drawableSizeWillChange:(CGSize)size {}
 
@@ -353,5 +399,11 @@ extern "C" {
     }
     void live2DSetModelScale(Live2DManagerHandle handle, float scale) {
         [(__bridge Live2DManagerObjC*)handle setModelScale:scale];
+    }
+    void live2DSetLook(Live2DManagerHandle handle, float x, float y) {
+        [(__bridge Live2DManagerObjC*)handle setLook:x y:y];
+    }
+    void live2DPlaySpecial(Live2DManagerHandle handle) {
+        [(__bridge Live2DManagerObjC*)handle playSpecial];
     }
 }

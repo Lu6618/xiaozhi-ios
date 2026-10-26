@@ -16,5 +16,7 @@ void live2DManagerTouchesBegan(Live2DManagerHandle handle);
 void destroyLive2DManager(Live2DManagerHandle handle);
 void live2DSetMouthOpen(Live2DManagerHandle handle, float level);
 void live2DSetModelScale(Live2DManagerHandle handle, float scale);
+void live2DSetLook(Live2DManagerHandle handle, float x, float y);
+void live2DPlaySpecial(Live2DManagerHandle handle);
 
 #endif /* xiaozhi_Bridging_Header_h */

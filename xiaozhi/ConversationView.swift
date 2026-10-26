@@ -11,6 +11,7 @@ private enum ConversationUIMode {
 struct ConversationView: View {
     @EnvironmentObject private var chatVM: ChatViewModel
     @StateObject private var audioMonitor = AudioVolumeMonitor()
+    @StateObject private var live2DController = Live2DController()
     @StateObject private var settings = Live2DSettings.shared
 
     @State private var messageText = ""
@@ -218,12 +219,14 @@ struct ConversationView: View {
             directoryName: settings.currentModel.dir,
             jsonName: settings.currentModel.json,
             modelScale: settings.currentModel.scale,
+            controller: live2DController,
             audioMonitor: audioMonitor
         )
         .id(settings.currentModel.dir)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onTapGesture { isComposerFocused = false }
+        .live2DInteraction(controller: live2DController)
     }
 
     private var voiceStage: some View {

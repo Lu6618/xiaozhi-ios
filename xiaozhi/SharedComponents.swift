@@ -80,11 +80,35 @@ struct MessageRowView: View {
     }
 }
 
+// Live2D 控制器:SwiftUI 侧持有,供手势调用模型动作 (句柄由 Live2DView 填入)
+final class Live2DController: ObservableObject {
+    var handle: Live2DManagerHandle?
+    
+    /// 点按:随机播一个 TapBody 动作
+    func tap() {
+        guard let handle = handle else { return }
+        live2DManagerTouchesBegan(handle)
+    }
+    
+    /// 长按:播一个特殊动作 (TapBody 多于 1 个时取最后一个,否则随机 Idle)
+    func special() {
+        guard let handle = handle else { return }
+        live2DPlaySpecial(handle)
+    }
+    
+    /// 视线:x/y 为 -1~1,0 为回正
+    func setLook(x: Float, y: Float) {
+        guard let handle = handle else { return }
+        live2DSetLook(handle, x, y)
+    }
+}
+
 // Live2DView 保持不变
 struct Live2DView: UIViewRepresentable {
     var directoryName: String
     var jsonName: String
     var modelScale: Float = 1.0
+    var controller: Live2DController? = nil
     
     @ObservedObject var audioMonitor: AudioVolumeMonitor
     
@@ -98,6 +122,8 @@ struct Live2DView: UIViewRepresentable {
         
         let handle = createLive2DManager(Unmanaged.passUnretained(mtkView).toOpaque())
         context.coordinator.managerHandle = handle
+        context.coordinator.controller = controller
+        controller?.handle = handle
         
         loadLive2DModel(handle, "Asset/\(directoryName)", jsonName)
         live2DSetModelScale(handle, modelScale)
@@ -111,15 +137,117 @@ struct Live2DView: UIViewRepresentable {
         }
     }
     
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeCoordinator() -> Coordinator {
+        let coordinator = Coordinator()
+        coordinator.controller = controller
+        return coordinator
+    }
     
     static func dismantleUIView(_ uiView: MTKView, coordinator: Coordinator) {
         if let handle = coordinator.managerHandle {
+            if coordinator.controller?.handle == handle {
+                coordinator.controller?.handle = nil
+            }
             destroyLive2DManager(handle)
         }
     }
 
     class Coordinator: NSObject {
         var managerHandle: Live2DManagerHandle?
+        var controller: Live2DController?
+    }
+}
+
+// MARK: - 模型互动:点按 / 长按 / 拖动视线 / 粒子
+struct Live2DParticle: Identifiable {
+    let id = UUID()
+    let position: CGPoint
+    let symbol: String
+}
+
+struct Live2DInteractionModifier: ViewModifier {
+    @ObservedObject var controller: Live2DController
+    @State private var particles: [Live2DParticle] = []
+    @State private var longPressFired = false
+    @State private var lastLocation: CGPoint?
+    
+    private func spawn(_ symbol: String, at point: CGPoint) {
+        let particle = Live2DParticle(position: point, symbol: symbol)
+        particles.append(particle)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            particles.removeAll { $0.id == particle.id }
+        }
+    }
+    
+    private var drag: some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                lastLocation = value.location
+                let x = Float(value.translation.width / 150.0)
+                let y = Float(-value.translation.height / 150.0)
+                controller.setLook(x: max(-1, min(1, x)), y: max(-1, min(1, y)))
+            }
+            .onEnded { value in
+                controller.setLook(x: 0, y: 0)
+                if longPressFired {
+                    longPressFired = false
+                } else if abs(value.translation.width) < 12 && abs(value.translation.height) < 12 {
+                    controller.tap()
+                    spawn(["❤️", "✨", "⭐", "💖"].randomElement() ?? "❤️", at: value.startLocation)
+                }
+            }
+    }
+    
+    private var longPress: some Gesture {
+        LongPressGesture(minimumDuration: 0.5)
+            .onEnded { _ in
+                longPressFired = true
+                controller.special()
+                if let point = lastLocation {
+                    for dx in [-24, 0, 24] {
+                        spawn("❤️", at: CGPoint(x: point.x + CGFloat(dx), y: point.y))
+                    }
+                }
+            }
+    }
+    
+    func body(content: Content) -> some View {
+        content
+            .simultaneousGesture(drag)
+            .simultaneousGesture(longPress)
+            .overlay {
+                ZStack {
+                    ForEach(particles) { particle in
+                        Live2DParticleView(symbol: particle.symbol)
+                            .position(particle.position)
+                    }
+                }
+            }
+    }
+}
+
+struct Live2DParticleView: View {
+    let symbol: String
+    @State private var offset: CGFloat = 0
+    @State private var opacity: Double = 1
+    
+    var body: some View {
+        Text(symbol)
+            .font(.system(size: 28))
+            .offset(y: offset)
+            .opacity(opacity)
+            .onAppear {
+                withAnimation(.easeOut(duration: 0.9)) {
+                    offset = -70
+                    opacity = 0
+                }
+            }
+    }
+}
+
+extension View {
+    /// 给模型视图加互动:点按播动作并冒粒子,长按播特殊动作,拖动转视线
+    func live2DInteraction(controller: Live2DController) -> some View {
+        modifier(Live2DInteractionModifier(controller: controller))
     }
 }

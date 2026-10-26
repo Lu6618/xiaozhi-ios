@@ -4,6 +4,7 @@ struct Live2DTestView: View {
     
     @StateObject private var settings = Live2DSettings.shared
     @StateObject private var audioMonitor = AudioVolumeMonitor()
+    @StateObject private var live2DController = Live2DController()
     
     // 引用全局 ViewModel
     @EnvironmentObject var chatVM: ChatViewModel
@@ -22,10 +23,12 @@ struct Live2DTestView: View {
                 directoryName: settings.currentModel.dir,
                 jsonName: settings.currentModel.json,
                 modelScale: settings.currentModel.scale,
+                controller: live2DController,
                 audioMonitor: audioMonitor
             )
             .ignoresSafeArea()
             .id(settings.currentModel.dir)
+            .live2DInteraction(controller: live2DController)
             
             // 2. 界面浮层
             VStack {
