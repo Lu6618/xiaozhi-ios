@@ -217,6 +217,7 @@ struct ConversationView: View {
         Live2DView(
             directoryName: settings.currentModel.dir,
             jsonName: settings.currentModel.json,
+            modelScale: settings.currentModel.scale,
             audioMonitor: audioMonitor
         )
         .id(settings.currentModel.dir)
