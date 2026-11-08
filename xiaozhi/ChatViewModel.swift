@@ -866,15 +866,18 @@ class ChatViewModel: ObservableObject {
         let mcpSid = pendingMcpSessionId
         resetMcpState()
 
-        // 3. 异步上传到 MCP 服务，再让小智调 MCP vision 工具看图
+        // 3. 异步调 MCP 视觉接口拿描述，再把描述（自然语言）发给小智
         let loadingMsg = ChatMessage(text: "✨ 正在识别图片内容...", type: .received)
         self.messageList.append(loadingMsg)
 
         Task {
             do {
-                // 上传图片到 MCP 服务，拿到 vision 工具能访问的链接
-                let imageURL = try await Self.uploadImageToMcp(base64: base64Str)
-                print(">>> 🖼️ 图片已上传到 MCP：\(imageURL)")
+                // App 自己调 MCP 的正式视觉接口（POST /vision），直接传 base64，
+                // 拿到自然语言描述。链接绝不能走语音通道：TTS 把 URL 念出来、
+                // 服务端 STT 再识别回来，斜杠/点/字母必然被拆乱（build 121 的教训），
+                // 所以 build 121 的“发链接让小智调 vision 工具”流程彻底废弃。
+                let description = try await Self.recognizeImageViaMcp(base64: base64Str)
+                print(">>> 🖼️ MCP 视觉描述：\(description)")
 
                 if let last = self.messageList.last, last.text.contains("正在识别") {
                     self.messageList.removeLast()
@@ -884,42 +887,119 @@ class ChatViewModel: ObservableObject {
                 // 屏蔽服务器随后误触发的 take_photo）
                 self.lastVisionDeliveredAt = Date()
 
-                // 让小智调用 MCP vision 工具：消息里只给链接和工具名，
-                // 不出现“照片/图片/图/拍”等触发词，免得小智又调相机。
+                // 描述是自然语言，走 TTS/STT 不会被拆坏（build 114 的老流程证实可行）。
                 // showBubble 必须传 true：它的语义是反直觉的——传 true 才表示
                 // “这次是静默注入”，服务器回传的 STT 转写会被 isShowBubble 吞掉、不显示气泡。
-                let instruction = "请调用 vision 工具，用 image_url 识别这个链接：\(imageURL)"
                 if let reqId = mcpReqId, let sid = mcpSid {
-                    // A. MCP 触发的拍照：链接直接作为工具回执发回服务器。
-                    // 工具回执是“已完成的观察”，大模型读到链接后会调 vision 工具识别。
-                    mcpManager.sendSuccess(id: reqId, sessionId: sid, text: instruction)
+                    // A. MCP 触发的拍照：描述直接作为工具回执发回服务器。
+                    // 工具回执是“已完成的观察”，不是用户发言，不走语音，不会被 STT 拆乱。
+                    mcpManager.sendSuccess(id: reqId, sessionId: sid, text: description)
                 } else {
                     // B. 用户主动拍照/选图：走语音注入（injectVoiceCommand）发给小智。
                     // 语音注入是 App 里唯一能让服务器回话的路径（打字消息也走这条路）；
                     // 冷发的 {"type": "text"} 文本消息在服务端没有对应的处理器，
                     // 会被静默丢弃、小智永远不回（build 112 的教训）。
-                    self.injectVoiceCommand(text: instruction, showBubble: true)
+                    self.injectVoiceCommand(text: description + "你觉得怎么样？", showBubble: true)
                 }
 
             } catch {
-                print("MCP Vision Upload Error: \(error)")
+                print("MCP Vision Error: \(error)")
                 if let last = self.messageList.last, last.text.contains("正在识别") {
                     self.messageList.removeLast()
                 }
                 if let reqId = mcpReqId, let sid = mcpSid {
                     // MCP 任务失败也要回执，否则服务器会一直等工具结果
-                    mcpManager.sendError(id: reqId, sessionId: sid, message: "图片上传失败")
+                    mcpManager.sendError(id: reqId, sessionId: sid, message: "图片识别失败")
                 } else {
-                    let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    let reason = Self.mcpVisionErrorMessage(error)
                     self.speakLocally(text: "图片识别失败：\(reason)")
                 }
             }
         }
     }
 
+    /// 调 MCP 的正式视觉接口（POST https://mcp.698668.xyz/vision），直接传 base64，
+    /// 返回视觉模型的中文描述。最多重试 3 次（瞬时网络错误与 5xx 才重试，4xx 不重试）。
+    private static func recognizeImageViaMcp(base64: String) async throws -> String {
+        guard let url = URL(string: "https://mcp.698668.xyz/vision") else {
+            throw URLError(.badURL)
+        }
+        var lastError: Error = URLError(.unknown)
+        for attempt in 1...3 {
+            do {
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.timeoutInterval = 60
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.httpBody = try JSONSerialization.data(withJSONObject: ["image_base64": base64])
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw URLError(.badServerResponse)
+                }
+                if (200...299).contains(http.statusCode) {
+                    guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                          let result = json["result"] as? String, !result.isEmpty else {
+                        throw URLError(.cannotParseResponse)
+                    }
+                    return result
+                }
+                // 4xx（鉴权、参数）不重试，直接抛
+                let message = String(data: data, encoding: .utf8) ?? ""
+                throw NetworkServiceError.httpStatus(http.statusCode, message)
+            } catch {
+                lastError = error
+                guard Self.isRetryableVisionError(error), attempt < 3 else { throw error }
+                try? await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000) // 1 秒、2 秒递增
+            }
+        }
+        throw lastError
+    }
+
+    /// 只有瞬时网络错误与 5xx 才重试（与 build 119 的 VisionService.post 同一套规则）。
+    private static func isRetryableVisionError(_ error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost,
+                 .notConnectedToInternet, .secureConnectionFailed:
+                return true
+            default:
+                return false
+            }
+        }
+        if case NetworkServiceError.httpStatus(let code, _) = error {
+            return (500...599).contains(code)
+        }
+        return false
+    }
+
+    /// 按错误给中文说明，不再只报英文原文。
+    private static func mcpVisionErrorMessage(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .networkConnectionLost, .notConnectedToInternet:
+                return "网络连接中断，已自动重试 3 次仍失败，请检查网络后重新拍照"
+            case .timedOut:
+                return "识别超时，已自动重试 3 次仍失败，请检查网络后重新拍照"
+            case .cannotFindHost, .cannotConnectToHost:
+                return "连不上识别服务，请检查网络后重新拍照"
+            case .secureConnectionFailed:
+                return "安全连接失败，请检查网络后重新拍照"
+            default:
+                break
+            }
+        }
+        if case NetworkServiceError.httpStatus(let code, _) = error {
+            return (400...499).contains(code)
+                ? "识别服务返回错误（\(code)），请稍后再试"
+                : "识别服务暂时不可用（\(code)），请稍后再试"
+        }
+        return error.localizedDescription
+    }
+
     /// 把图片 base64 上传到 MCP 服务（POST https://mcp.698668.xyz/upload），
-    /// 返回 vision 工具能访问的图片链接（https://mcp.698668.xyz/img/<id>）。
-    /// 上传前已在调用方压缩过（相机 800px / 相册最长边 1024），这里只做一次大小校验。
+    /// 返回图片链接（https://mcp.698668.xyz/img/<id>）。
+    /// 仅小红书发布流程（confirmPublish）在用；拍照/选图识别已改走 POST /vision
+    /// 直接拿描述，不再经过上传（链接走语音通道会被 STT 拆乱）。
     private static func uploadImageToMcp(base64: String) async throws -> String {
         guard let url = URL(string: "https://mcp.698668.xyz/upload") else {
             throw URLError(.badURL)
