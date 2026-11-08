@@ -909,8 +909,10 @@ class ChatViewModel: ObservableObject {
                 // 这会调用本地 TTS 生成一段音频流发给服务器，伪装成用户在说话
                 // 服务器收到音频后，一定会回复
                 
-                let prompt = "我拍了一张照片，内容是：\(result)。请你评价一下。"
-                self.injectVoiceCommand(text: prompt, showBubble: true)
+                // 提示词按视觉设置里的模板拼（默认：小智视角直接描述所见）；
+                // showBubble: false，不在聊天里显示这句提示词，看起来就是小智直接看到了照片
+                let prompt = AppConfig.renderVisionPrompt(description: result)
+                self.injectVoiceCommand(text: prompt, showBubble: false)
                 
             } catch {
                 print("Vision Error: \(error)")
