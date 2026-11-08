@@ -161,7 +161,7 @@ class AudioService {
                 if callKitCallActive {
                     // CallKit 通话：用 .voiceChat（系统通话回声消除、默认听筒），不加 .defaultToSpeaker
                     //（通话该走听筒，用户要免提点系统通话界面的扬声器）；App 内通话保持原来的 .default + 扬声器。
-                    try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetooth, .allowBluetoothA2DP])
+                    try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .allowBluetoothA2DP])
                 } else {
                     try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP, .allowAirPlay])
                 }

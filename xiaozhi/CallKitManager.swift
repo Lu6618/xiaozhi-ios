@@ -43,7 +43,8 @@ final class CallKitManager: NSObject {
     var isCallActive: Bool { currentCallUUID != nil }
 
     private override init() {
-        let config = CXProviderConfiguration(localizedName: "小智")
+        let config = CXProviderConfiguration()
+        config.localizedName = "小智"
         config.supportsVideo = false
         config.maximumCallsPerCallGroup = 1
         config.supportedHandleTypes = [.generic]
@@ -90,7 +91,7 @@ final class CallKitManager: NSObject {
     /// 去电失败（连不上 / 需激活时调）：系统界面显示呼叫失败并收起。
     func reportFailed() {
         guard let uuid = currentCallUUID else { return }
-        provider.reportOutgoingCall(with: uuid, failedAt: Date(), reason: .failed)
+        provider.reportCall(with: uuid, endedAt: Date(), reason: .failed)
         currentCallUUID = nil
     }
 
