@@ -14,6 +14,7 @@ struct ConversationView: View {
     @StateObject private var audioMonitor = AudioVolumeMonitor()
     @StateObject private var live2DController = Live2DController()
     @StateObject private var settings = Live2DSettings.shared
+    @StateObject private var composerStore = ComposerTextFieldStore()
 
     @State private var messageText = ""
     @State private var mode: ConversationUIMode = .pushToTalk
@@ -317,11 +318,11 @@ struct ConversationView: View {
                 }
                 .buttonStyle(.plain)
 
-                TextField("给小智发消息", text: $messageText, axis: .vertical)
-                    .focused($isComposerFocused)
-                    .lineLimit(1...4)
-                    .submitLabel(.send)
-                    .onSubmit(sendMessage)
+                // 真实的 UITextField（UIViewRepresentable）：发送时直接读它的 .text，
+                // 不再读 SwiftUI 绑定快照。旧的 SwiftUI TextField 用 axis: .vertical，
+                // 底层是 UITextView，build 90 的 `as? UITextField` 查找永远失败、
+                // 永远回退到滞后的绑定——这就是打完字立刻发丢尾巴的原因。
+                ComposerTextField(text: $messageText, isFocused: $isComposerFocused, store: composerStore, onSubmit: sendMessage)
 
                 // 发送按钮固定嵌在输入框内部右侧：有文字时蓝色可点，没文字时灰色不可点
                 Button(action: sendMessage) {
@@ -427,24 +428,16 @@ struct ConversationView: View {
     }
 
     private func sendMessage() {
-        // 直接读底层 UITextField 的真实文本：中文输入时，未确认的拼音组词（marked text）
-        // 不会同步到 SwiftUI 的 messageText 绑定，读绑定会丢最后几个字；
-        // 打完字马上点发送丢字、停一会儿再发不丢，就是这个原因（不是防抖/节流，绑定上没有）。
-        let content = currentComposerText().trimmingCharacters(in: .whitespacesAndNewlines)
+        // 直接读底层 UITextField 的真实文本（先提交未确认的拼音组词），再读 .text：
+        // 这是唯一可信的文本来源，包含输入框里显示的全部字符。
+        // 不要读 SwiftUI 的 messageText 绑定——中文输入时拼音组词（marked text）
+        // 不会同步到绑定，打完字马上点发送读绑定会丢最后几个字。
+        let raw = composerStore.committedText() ?? messageText
+        let content = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
         chatVM.sendTextMessage(content)
+        composerStore.clear()
         messageText = ""
-    }
-
-    /// 输入框当前真实文本（含中文输入法未确认的 marked text）。
-    /// 优先读第一响应 UITextField 的 text（包含 marked text 的已显示字符），
-    /// 拿不到时回退到 SwiftUI 绑定值。
-    private func currentComposerText() -> String {
-        if let field = UIResponder.currentFirstResponder as? UITextField,
-           let text = field.text, !text.isEmpty {
-            return text
-        }
-        return messageText
     }
 
     private func openCamera() {
@@ -453,7 +446,11 @@ struct ConversationView: View {
     }
 
     private var isComposerEmpty: Bool {
-        messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        // 发送按钮的可用状态也要看输入框真实文本：拼音组词期间绑定可能滞后，
+        // 只看绑定会让按钮在还有字时错误地变灰。
+        let fieldText = composerStore.visibleText
+        let current = fieldText.isEmpty ? messageText : fieldText
+        return current.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func enterPushToTalkMode() {
@@ -874,24 +871,6 @@ private struct ServiceSettingsSheet: View {
         .onAppear {
             migrateLegacyEndpointIfNeeded()
         }
-    }
-}
-
-// MARK: - 第一响应者查找（读输入框真实文本用）
-
-extension UIResponder {
-    private static weak var _currentFirstResponder: UIResponder?
-
-    /// 当前第一响应者（通过 responder chain 查找）。发送时用它读底层 UITextField 的 text，
-    /// 才能拿到中文输入法未确认的 marked text；SwiftUI 的绑定在 marked text 期间不同步。
-    static var currentFirstResponder: UIResponder? {
-        _currentFirstResponder = nil
-        UIApplication.shared.sendAction(#selector(UIResponder.captureFirstResponder(_:)), to: nil, from: nil, for: nil)
-        return _currentFirstResponder
-    }
-
-    @objc private func captureFirstResponder(_ sender: Any?) {
-        UIResponder._currentFirstResponder = self
     }
 }
 
