@@ -19,10 +19,10 @@ struct ConversationView: View {
     @State private var isPressingToTalk = false
     @State private var showModelSelector = false
     @State private var showServiceSettings = false
-    @State private var showImageGeneration = false
+    @State private var showHeaderActions = false
+    @State private var showMediaActions = false
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var showPhotoPicker = false
-    @State private var mediaActionLocked = false
     @State private var showClearHistoryConfirmation = false
     @State private var callStartedAt: Date?
     @State private var callElapsedSeconds = 0
@@ -90,8 +90,18 @@ struct ConversationView: View {
             Button("清空", role: .destructive) { chatVM.clearConversationHistory() }
             Button("取消", role: .cancel) {}
         }
-        .sheet(isPresented: $showImageGeneration) {
-            ImageGenerationSheet()
+        .confirmationDialog("更多", isPresented: $showHeaderActions, titleVisibility: .hidden) {
+            Button("服务设置") { showServiceSettings = true }
+            Button("清空聊天记录", role: .destructive) {
+                // 等当前弹窗收起后再弹清空确认，避免两个弹窗叠在一起
+                DispatchQueue.main.async { showClearHistoryConfirmation = true }
+            }
+            Button("取消", role: .cancel) {}
+        }
+        .confirmationDialog("添加", isPresented: $showMediaActions, titleVisibility: .hidden) {
+            Button("拍照") { openCamera() }
+            Button("相册") { showPhotoPicker = true }
+            Button("取消", role: .cancel) {}
         }
         .photosPicker(isPresented: $showPhotoPicker, selection: $selectedPhoto, matching: .images)
         .onChange(of: selectedPhoto) { item in
@@ -152,21 +162,16 @@ struct ConversationView: View {
                 .clipShape(Capsule())
             }
 
-            Menu {
-                Button { showServiceSettings = true } label: {
-                    Label("服务设置", systemImage: "server.rack")
-                }
-                Button(role: .destructive) { showClearHistoryConfirmation = true } label: {
-                    Label("清空聊天记录", systemImage: "trash")
-                }
-            } label: {
+            Button { showHeaderActions = true } label: {
                 Image(systemName: "gearshape.fill")
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.primary)
                     .frame(width: 38, height: 38)
                     .background(Color(uiColor: .systemGray6))
                     .clipShape(Circle())
+                    .contentShape(Circle())
             }
+            .buttonStyle(.plain)
 
             Circle()
                 .fill(statusColor)
@@ -225,8 +230,7 @@ struct ConversationView: View {
         .id(settings.currentModel.dir)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .onTapGesture { isComposerFocused = false }
-        .live2DInteraction(controller: live2DController)
+        .live2DInteraction(controller: live2DController) { isComposerFocused = false }
     }
 
     private var voiceStage: some View {
@@ -286,7 +290,7 @@ struct ConversationView: View {
                 }
             )
         }
-        .padding(.horizontal, 18)
+        .padding(.horizontal, 12)
         .padding(.top, 8)
         .padding(.bottom, 6)
     }
@@ -295,21 +299,13 @@ struct ConversationView: View {
     private var longComposerControl: some View {
         if mode == .text {
             HStack(spacing: 8) {
-                Menu {
-                    Button { openCamera() } label: {
-                        Label("拍照", systemImage: "camera")
-                    }
-                    Button { showPhotoPicker = true } label: {
-                        Label("从相册选择", systemImage: "photo.on.rectangle")
-                    }
-                    Button { showImageGeneration = true } label: {
-                        Label("AI 生图", systemImage: "wand.and.stars")
-                    }
-                } label: {
+                Button { showMediaActions = true } label: {
                     Image(systemName: "plus")
                         .font(.system(size: 22, weight: .medium))
                         .frame(width: 36, height: 36)
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
 
                 TextField("给小智发消息", text: $messageText, axis: .vertical)
                     .focused($isComposerFocused)
@@ -317,16 +313,17 @@ struct ConversationView: View {
                     .submitLabel(.send)
                     .onSubmit(sendMessage)
 
-                if !messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Button(action: sendMessage) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(.white)
-                            .frame(width: 34, height: 34)
-                            .background(Color.blue)
-                            .clipShape(Circle())
-                    }
+                // 发送按钮固定嵌在输入框内部右侧：有文字时蓝色可点，没文字时灰色不可点
+                Button(action: sendMessage) {
+                    Image(systemName: "arrow.up")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: 34, height: 34)
+                        .background(isComposerEmpty ? Color.gray.opacity(0.6) : Color.blue)
+                        .clipShape(Circle())
                 }
+                .disabled(isComposerEmpty)
+                .buttonStyle(.plain)
             }
             .foregroundStyle(.black)
             .padding(.horizontal, 8)
@@ -378,9 +375,9 @@ struct ConversationView: View {
     private func composerCircleButton(icon: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Image(systemName: icon)
-                .font(.system(size: 20, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(.white)
-                .frame(width: 54, height: 54)
+                .frame(width: 44, height: 44)
                 .background(Color.blue)
                 .clipShape(Circle())
         }
@@ -426,13 +423,12 @@ struct ConversationView: View {
     }
 
     private func openCamera() {
-        guard !mediaActionLocked else { return }
-        mediaActionLocked = true
         chatVM.cancelCamera()
         chatVM.showCamera = true
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            mediaActionLocked = false
-        }
+    }
+
+    private var isComposerEmpty: Bool {
+        messageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     private func enterPushToTalkMode() {
