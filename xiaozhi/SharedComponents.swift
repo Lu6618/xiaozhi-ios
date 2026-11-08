@@ -167,10 +167,12 @@ struct Live2DParticle: Identifiable {
 
 struct Live2DInteractionModifier: ViewModifier {
     @ObservedObject var controller: Live2DController
+    /// 点按时额外回调（例如收起键盘）；默认不做任何事
+    var onTap: (() -> Void)? = nil
     @State private var particles: [Live2DParticle] = []
     @State private var longPressFired = false
-    @State private var lastLocation: CGPoint?
-    
+    @State private var lastLocation: CGPoint = CGPoint(x: 180, y: 240)
+
     private func spawn(_ symbol: String, at point: CGPoint) {
         let particle = Live2DParticle(position: point, symbol: symbol)
         particles.append(particle)
@@ -178,41 +180,54 @@ struct Live2DInteractionModifier: ViewModifier {
             particles.removeAll { $0.id == particle.id }
         }
     }
-    
+
+    // 点按：用标准 SpatialTapGesture，不抢触摸，还能拿到点按位置冒粒子。
+    // 之前用 DragGesture(minimumDistance: 0) 认点按，它在手指一落下就认领触摸，
+    // 会抢走附近按钮的点击，是按钮要点十几下才有反应的主因之一。
+    private var tap: some Gesture {
+        SpatialTapGesture()
+            .onEnded { value in
+                // 长按刚触发过特殊动作时，这次抬手不再重复触发点按
+                if longPressFired {
+                    longPressFired = false
+                    return
+                }
+                lastLocation = value.location
+                controller.tap()
+                onTap?()
+                spawn(["❤️", "✨", "⭐", "💖"].randomElement() ?? "❤️", at: value.location)
+            }
+    }
+
+    // 拖动视线：只有真正拖动（>12pt）才认，点按不会误触发，也就不会抢点击
     private var drag: some Gesture {
-        DragGesture(minimumDistance: 0)
+        DragGesture(minimumDistance: 12)
             .onChanged { value in
                 lastLocation = value.location
                 let x = Float(value.translation.width / 150.0)
                 let y = Float(-value.translation.height / 150.0)
                 controller.setLook(x: max(-1, min(1, x)), y: max(-1, min(1, y)))
             }
-            .onEnded { value in
+            .onEnded { _ in
                 controller.setLook(x: 0, y: 0)
-                if longPressFired {
-                    longPressFired = false
-                } else if abs(value.translation.width) < 12 && abs(value.translation.height) < 12 {
-                    controller.tap()
-                    spawn(["❤️", "✨", "⭐", "💖"].randomElement() ?? "❤️", at: value.startLocation)
-                }
+                longPressFired = false
             }
     }
-    
+
     private var longPress: some Gesture {
         LongPressGesture(minimumDuration: 0.5)
             .onEnded { _ in
                 longPressFired = true
                 controller.special()
-                if let point = lastLocation {
-                    for dx in [-24, 0, 24] {
-                        spawn("❤️", at: CGPoint(x: point.x + CGFloat(dx), y: point.y))
-                    }
+                for dx in [-24, 0, 24] {
+                    spawn("❤️", at: CGPoint(x: lastLocation.x + CGFloat(dx), y: lastLocation.y))
                 }
             }
     }
-    
+
     func body(content: Content) -> some View {
         content
+            .simultaneousGesture(tap)
             .simultaneousGesture(drag)
             .simultaneousGesture(longPress)
             .overlay {
@@ -222,6 +237,8 @@ struct Live2DInteractionModifier: ViewModifier {
                             .position(particle.position)
                     }
                 }
+                // 粒子层不参与点击，绝不拦截按钮
+                .allowsHitTesting(false)
             }
     }
 }
@@ -247,7 +264,8 @@ struct Live2DParticleView: View {
 
 extension View {
     /// 给模型视图加互动:点按播动作并冒粒子,长按播特殊动作,拖动转视线
-    func live2DInteraction(controller: Live2DController) -> some View {
-        modifier(Live2DInteractionModifier(controller: controller))
+    /// onTap: 点按时额外回调（例如收起键盘）
+    func live2DInteraction(controller: Live2DController, onTap: (() -> Void)? = nil) -> some View {
+        modifier(Live2DInteractionModifier(controller: controller, onTap: onTap))
     }
 }
