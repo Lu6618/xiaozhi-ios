@@ -586,41 +586,7 @@ class ChatViewModel: ObservableObject {
 
         messageList.append(ChatMessage(text: content, type: .sent))
 
-        // 对话里生图：先过一个快速本地门控（只有可能与生图有关才问模型，避免每次对话都多一次调用），
-        // 再让配置的大模型判断是不是生图请求并提炼描述；是则走生图，否则走原来的小智语音对话。
-        guard ImageGenerationService.mightBeImageRequest(content) else {
-            injectVoiceCommand(text: content, showBubble: true)
-            return
-        }
-        Task {
-            if let prompt = await ImageGenerationService.shared.detectImagePrompt(for: content) {
-                await self.generateImageFromChat(prompt: prompt)
-            } else {
-                await MainActor.run { self.injectVoiceCommand(text: content, showBubble: true) }
-            }
-        }
-    }
-
-    /// 对话里触发的生图：用服务设置里的同一套配置生成图片，显示在对话里
-    @MainActor
-    private func generateImageFromChat(prompt: String) async {
-        let loading = ChatMessage(text: "🎨 正在生成图片…", type: .received)
-        messageList.append(loading)
-        do {
-            let data = try await ImageGenerationService.shared.generateWithVisionConfig(prompt: prompt)
-            guard let image = UIImage(data: data) else { throw ImageGenerationError.invalidResponse }
-            if let idx = messageList.firstIndex(where: { $0.id == loading.id }) {
-                messageList[idx] = ChatMessage(text: "图片已生成", type: .received, image: image)
-            } else {
-                messageList.append(ChatMessage(text: "图片已生成", type: .received, image: image))
-            }
-        } catch {
-            if let idx = messageList.firstIndex(where: { $0.id == loading.id }) {
-                messageList.remove(at: idx)
-            }
-            let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-            speakLocally(text: "生图失败：\(reason)")
-        }
+        injectVoiceCommand(text: content, showBubble: true)
     }
 
     // ----------------------------------------------------------------
@@ -887,160 +853,94 @@ class ChatViewModel: ObservableObject {
     @MainActor
     func processCapturedImage(base64Str: String) {
         self.showCamera = false
-        
+
         // 1. 回显图片
         if let data = Data(base64Encoded: base64Str),
            let originalImage = UIImage(data: data) {
             let photoMsg = ChatMessage(text: "", type: .sent, image: originalImage)
             self.messageList.append(photoMsg)
         }
-        
-        // 2. 抓 MCP 待回执（分析完再回；先清状态，避免重入）
+
+        // 2. 抓 MCP 待回执（上传完再回；先清状态，避免重入）
         let mcpReqId = pendingMcpRequestId
         let mcpSid = pendingMcpSessionId
         resetMcpState()
-        
-        // 3. 异步分析
+
+        // 3. 异步上传到 MCP 服务，再让小智调 MCP vision 工具看图
         let loadingMsg = ChatMessage(text: "✨ 正在识别图片内容...", type: .received)
         self.messageList.append(loadingMsg)
-        
+
         Task {
             do {
-                let result = try await VisionService.analyze(base64: base64Str)
-                print(">>> 👁️ 视觉分析结果: \(result)")
-                
+                // 上传图片到 MCP 服务，拿到 vision 工具能访问的链接
+                let imageURL = try await Self.uploadImageToMcp(base64: base64Str)
+                print(">>> 🖼️ 图片已上传到 MCP：\(imageURL)")
+
                 if let last = self.messageList.last, last.text.contains("正在识别") {
                     self.messageList.removeLast()
                 }
-                
+
                 // 标记：刚交付过视觉结果（mcpDidRequestCamera 里的守卫用，
                 // 屏蔽服务器随后误触发的 take_photo）
                 self.lastVisionDeliveredAt = Date()
-                
+
+                // 让小智调用 MCP vision 工具：消息里只给链接和工具名，
+                // 不出现“照片/图片/图/拍”等触发词，免得小智又调相机。
+                // showBubble 必须传 true：它的语义是反直觉的——传 true 才表示
+                // “这次是静默注入”，服务器回传的 STT 转写会被 isShowBubble 吞掉、不显示气泡。
+                let instruction = "请调用 vision 工具，用 image_url 识别这个链接：\(imageURL)"
                 if let reqId = mcpReqId, let sid = mcpSid {
-                    // A. MCP 触发的拍照：识别结果直接作为工具回执发回服务器。
-                    // 工具回执是“已完成的观察”，大模型只会据此回复，不会再调 take_photo。
-                    // 绝不能走 injectVoiceCommand：语音注入会伪装成用户又说了一句关于照片的话，
-                    // 大模型一听“照片/图”就再次调 take_photo，相机反复弹出（build 109 的教训）。
-                    // 提示词模板仍用于拼这条回执（工具回执里出现“照片”二字无妨，因为它不是用户发言）。
-                    let reply = AppConfig.renderVisionPrompt(description: result)
-                    mcpManager.sendSuccess(id: reqId, sessionId: sid, text: reply)
+                    // A. MCP 触发的拍照：链接直接作为工具回执发回服务器。
+                    // 工具回执是“已完成的观察”，大模型读到链接后会调 vision 工具识别。
+                    mcpManager.sendSuccess(id: reqId, sessionId: sid, text: instruction)
                 } else {
                     // B. 用户主动拍照/选图：走语音注入（injectVoiceCommand）发给小智。
-                    // 注意：冷发的 {"type": "text"} 文本消息在服务端没有对应的处理器，
-                    // 会被静默丢弃、小智永远不回（build 112 的教训：图片识别不返回任何内容）。
-                    // 语音注入是 App 里唯一能让服务器回话的路径（打字消息也走这条路）。
-                    // 内容只发净化后的画面描述（去掉“照片/图片/图/拍”等触发词），
-                    // 末尾加“你觉得怎么样？”让小智直接给看法、不去调工具。
-                    // 注意 showBubble 必须传 true：它的语义是反直觉的——传 true 才表示
-                    // “这次是静默注入”，服务器回传的 STT 转写会被 isShowBubble 吞掉、不显示气泡；
-                    // 传 false 回显会正常上屏，描述会以蓝色气泡显示出来（build 114 传错了 false）。
-                    var clean = Self.sanitizeVisionDescription(result)
-                    if clean.isEmpty { clean = result }
-                    self.injectVoiceCommand(text: "\(clean)。你觉得怎么样？", showBubble: true)
+                    // 语音注入是 App 里唯一能让服务器回话的路径（打字消息也走这条路）；
+                    // 冷发的 {"type": "text"} 文本消息在服务端没有对应的处理器，
+                    // 会被静默丢弃、小智永远不回（build 112 的教训）。
+                    self.injectVoiceCommand(text: instruction, showBubble: true)
                 }
-                
+
             } catch {
-                print("Vision Error: \(error)")
+                print("MCP Vision Upload Error: \(error)")
                 if let last = self.messageList.last, last.text.contains("正在识别") {
                     self.messageList.removeLast()
                 }
                 if let reqId = mcpReqId, let sid = mcpSid {
                     // MCP 任务失败也要回执，否则服务器会一直等工具结果
-                    mcpManager.sendError(id: reqId, sessionId: sid, message: "图片识别失败")
+                    mcpManager.sendError(id: reqId, sessionId: sid, message: "图片上传失败")
                 } else {
-                    let reason = Self.visionErrorMessage(error)
+                    let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.speakLocally(text: "图片识别失败：\(reason)")
                 }
             }
         }
     }
-    
-    // MARK: - 视觉结果交付（防相机误触发）
 
-    /// 把视觉失败原因翻译成人话：URLError 的英文原文（The network connection was lost.）
-    /// 用户看不懂，按错误码给中文说明；其他错误沿用原有描述。
-    /// 注意：重试已在 VisionService.post 里做过（最多 3 次），走到这里就是 3 次都失败了。
-    private static func visionErrorMessage(_ error: Error) -> String {
-        if let urlError = error as? URLError {
-            switch urlError.code {
-            case .networkConnectionLost:
-                return "网络连接中断，已自动重试 3 次仍失败，请检查网络后重新拍照"
-            case .timedOut:
-                return "请求超时，已自动重试 3 次仍失败，模型响应太慢或网络较慢"
-            case .notConnectedToInternet:
-                return "没有网络连接，请检查 Wi-Fi 或流量"
-            case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
-                return "连不上视觉服务地址，请检查设置里的地址是否正确"
-            case .secureConnectionFailed:
-                return "安全连接失败，请检查网络或服务地址"
-            default:
-                break
-            }
+    /// 把图片 base64 上传到 MCP 服务（POST https://mcp.698668.xyz/upload），
+    /// 返回 vision 工具能访问的图片链接（https://mcp.698668.xyz/img/<id>）。
+    /// 上传前已在调用方压缩过（相机 800px / 相册最长边 1024），这里只做一次大小校验。
+    private static func uploadImageToMcp(base64: String) async throws -> String {
+        guard let url = URL(string: "https://mcp.698668.xyz/upload") else {
+            throw URLError(.badURL)
         }
-        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 60
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: ["image_base64": base64])
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw NetworkServiceError.httpStatus(http.statusCode, message)
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let imageURL = json["url"] as? String, !imageURL.isEmpty else {
+            throw URLError(.cannotParseResponse)
+        }
+        return imageURL
     }
 
-    /// 净化视觉识别结果：去掉“照片/图片/图/拍”等会触发小智调相机的词。
-    /// “图”只去固定搭配（图中/图里/这张图），不单字去，以免误伤“地图/图案”等词；
-    /// “看”也不动（“看起来”是形容词，大模型能分清它和“看一下”的区别）。
-    static func sanitizeVisionDescription(_ text: String) -> String {
-        var out = text
-        // 长短语在前，避免短的先切坏长的
-        let phrases = [
-            "这张照片", "这张图片", "这幅照片", "这幅图片", "这图", "此图",
-            "照片里", "照片中", "照片上", "照片显示", "照片",
-            "图片里", "图片中", "图片上", "图片显示", "图片",
-            "画面里", "画面中", "画面上", "画面显示", "画面",
-            "图中", "图里", "图上", "这张图",
-            "拍照", "拍摄", "拍一张",
-            "镜头里", "镜头中"
-        ]
-        for p in phrases {
-            out = out.replacingOccurrences(of: p, with: "")
-        }
-        while out.contains("  ") { out = out.replacingOccurrences(of: "  ", with: " ") }
-        out = out.trimmingCharacters(in: .whitespacesAndNewlines)
-        while let first = out.first, "，。、：；".contains(first) {
-            out.removeFirst()
-        }
-        return out.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-//    func processCapturedImage(base64Str: String) {
-//        self.showCamera = false
-//        
-//        guard let reqId = pendingMcpRequestId, let sid = pendingMcpSessionId else { return }
-//        // 1. 解码图片
-//        guard let data = Data(base64Encoded: base64Str),
-//              let originalImage = UIImage(data: data) else { return }
-//        
-//        let photoMsg = ChatMessage(text: "", type: .sent, image: originalImage)
-//                self.messageList.append(photoMsg)
-//        
-//        print(">>> 🖼️ 照片已获取，任务类型: \(currentVisionTask)")
-//        
-//        if currentVisionTask == .analyze {
-//            // 视觉分析任务
-//            Task {
-//                do {
-//                    let result = try await VisionService.analyze(base64: base64Str)
-//                    mcpManager.sendSuccess(id: reqId, sessionId: sid, text: result)
-//                } catch {
-//                    mcpManager.sendError(id: reqId, sessionId: sid, message: "Analysis failed")
-//                }
-//                resetMcpState()
-//            }
-//        } else if currentVisionTask == .publishXhs {
-//            // 发布小红书任务 -> 进入编辑页
-//            if let data = Data(base64Encoded: base64Str), let img = UIImage(data: data) {
-//                self.publishDraftImage = img
-//            }
-//            self.publishDraftBase64 = base64Str // 暂存 Base64
-//            self.showPublishSheet = true
-//        }
-//    }
-    
     @MainActor
     func cancelCamera() {
         self.showCamera = false
@@ -1064,8 +964,8 @@ class ChatViewModel: ObservableObject {
         
         Task {
             do {
-                // 1. 上传图片换 URL
-                let imgUrl = try await VisionService.uploadImage(base64: base64)
+                // 1. 上传图片换 URL（走 MCP 服务）
+                let imgUrl = try await Self.uploadImageToMcp(base64: base64)
                 
                 // 2. 发布
                 let success = try await XHSService.publish(
