@@ -14,7 +14,14 @@ import UIKit
 /// after typing read a lagging snapshot and dropped the tail ("打车去苏州中心" → "打车").
 /// A real UITextField wrapped in UIViewRepresentable removes the guesswork:
 /// the View owns the field instance and reads its `.text` directly.
-final class ComposerTextFieldStore: ObservableObject {
+///
+/// NOTE: deliberately NOT an ObservableObject — it publishes nothing (the
+/// `messageText` binding drives UI updates). Swift only synthesizes
+/// ObservableObject conformance for classes with @Published properties, so
+/// declaring it ObservableObject without one fails to compile.
+/// @MainActor: it only ever touches UIKit objects from SwiftUI (main actor).
+@MainActor
+final class ComposerTextFieldStore {
     weak var textField: UITextField?
 
     /// The text to send: commits any in-flight Pinyin marked text, then reads
