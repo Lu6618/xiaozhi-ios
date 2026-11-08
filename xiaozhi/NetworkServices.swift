@@ -493,6 +493,74 @@ class MapService {
 }
 
 // ----------------------------------------------------------------
+// MARK: - 本机地理编码（CLGeocoder，不依赖本地后端）
+// ----------------------------------------------------------------
+
+/// On-device geocoding: resolves a place name to coordinates without the
+/// local backend (127.0.0.1:8005, unreachable on a real phone).
+/// CLGeocoder returns WGS-84; Amap wants GCJ-02, so convert (standard
+/// China offset algorithm; outside China the coordinates pass through).
+enum LocalGeocoder {
+    /// Place name -> GCJ-02 coordinate. Nil on failure (no network / no match).
+    static func geocode(_ address: String) async -> CLLocationCoordinate2D? {
+        let geocoder = CLGeocoder()
+        do {
+            let placemarks = try await withThrowingTaskGroup(of: [CLPlacemark].self) { group in
+                group.addTask {
+                    try await geocoder.geocodeAddressString(address)
+                }
+                group.addTask {
+                    try await Task.sleep(nanoseconds: 6_000_000_000)
+                    return []
+                }
+                let first = try await group.next() ?? []
+                group.cancelAll()
+                return first
+            }
+            guard let location = placemarks.first?.location else { return nil }
+            return wgs84ToGCJ02(location.coordinate)
+        } catch {
+            return nil
+        }
+    }
+
+    /// WGS-84 -> GCJ-02 (standard algorithm; no offset outside China).
+    static func wgs84ToGCJ02(_ coord: CLLocationCoordinate2D) -> CLLocationCoordinate2D {
+        guard coord.longitude >= 72.004 && coord.longitude <= 137.8347
+                && coord.latitude >= 0.8293 && coord.latitude <= 55.8271 else {
+            return coord
+        }
+        let a = 6378245.0
+        let ee = 0.00669342162296594323
+        let dLat = transformLat(lon: coord.longitude - 105.0, lat: coord.latitude - 35.0)
+        let dLon = transformLon(lon: coord.longitude - 105.0, lat: coord.latitude - 35.0)
+        let radLat = coord.latitude / 180.0 * .pi
+        var magic = sin(radLat)
+        magic = 1 - ee * magic * magic
+        let sqrtMagic = sqrt(magic)
+        let mgLat = coord.latitude + (dLat * 180.0) / ((a * (1 - ee)) / (magic * sqrtMagic) * .pi)
+        let mgLon = coord.longitude + (dLon * 180.0) / (a / sqrtMagic * cos(radLat) * .pi)
+        return CLLocationCoordinate2D(latitude: mgLat, longitude: mgLon)
+    }
+
+    private static func transformLat(lon x: Double, lat y: Double) -> Double {
+        var ret = -100.0 + 2.0 * x + 3.0 * y + 0.2 * y * y + 0.1 * x * y + 0.2 * sqrt(abs(x))
+        ret += (20.0 * sin(6.0 * x * .pi) + 20.0 * sin(2.0 * x * .pi)) * 2.0 / 3.0
+        ret += (20.0 * sin(y * .pi) + 40.0 * sin(y / 3.0 * .pi)) * 2.0 / 3.0
+        ret += (160.0 * sin(y / 12.0 * .pi) + 320 * sin(y * .pi / 30.0)) * 2.0 / 3.0
+        return ret
+    }
+
+    private static func transformLon(lon x: Double, lat y: Double) -> Double {
+        var ret = 300.0 + x + 2.0 * y + 0.1 * x * x + 0.1 * x * y + 0.1 * sqrt(abs(x))
+        ret += (20.0 * sin(6.0 * x * .pi) + 20.0 * sin(2.0 * x * .pi)) * 2.0 / 3.0
+        ret += (20.0 * sin(x * .pi) + 40.0 * sin(x / 3.0 * .pi)) * 2.0 / 3.0
+        ret += (150.0 * sin(x / 12.0 * .pi) + 300.0 * sin(x / 30.0 * .pi)) * 2.0 / 3.0
+        return ret
+    }
+}
+
+// ----------------------------------------------------------------
 // MARK: - 高德地图导航（打开系统高德 App）
 // ----------------------------------------------------------------
 
@@ -543,6 +611,17 @@ enum AmapNavigationService {
         guard isAmapInstalled else { return false }
         let encoded = poi.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
         guard let url = URL(string: "amapuri://drive/takeTaxi?sourceApplication=xiaozhi&dlon=\(poi.longitude)&dlat=\(poi.latitude)&dname=\(encoded)") else { return false }
+        UIApplication.shared.open(url)
+        return true
+    }
+
+    /// 打车：按本机地理编码出的坐标打开高德打车页（带目的地坐标与名字）。
+    /// 与 openTaxi(poi:) 同一个 takeTaxi 链接，只是不依赖后端 POI 对象。
+    @discardableResult
+    static func openTaxiToCoordinate(name: String, latitude: Double, longitude: Double) -> Bool {
+        guard isAmapInstalled else { return false }
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "amapuri://drive/takeTaxi?sourceApplication=xiaozhi&dlon=\(longitude)&dlat=\(latitude)&dname=\(encoded)") else { return false }
         UIApplication.shared.open(url)
         return true
     }
