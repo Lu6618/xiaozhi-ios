@@ -106,6 +106,8 @@ class ChatViewModel: ObservableObject {
     private var pendingMcpRequestId: Int?
     private var pendingMcpSessionId: String?
     private var currentVisionTask: VisionTaskType = .analyze
+    /// 上次成功交付视觉结果的时间。mcpDidRequestCamera 用它屏蔽随后误触发的 take_photo。
+    private var lastVisionDeliveredAt: Date?
     
     // 本地语音锁 (防止 AI 插嘴)
     private var isLocalSpeaking = false
@@ -885,11 +887,9 @@ class ChatViewModel: ObservableObject {
             self.messageList.append(photoMsg)
         }
         
-        // 2. 结束 MCP
-        let currentSid = pendingMcpSessionId
-        if let reqId = pendingMcpRequestId, let sid = currentSid {
-            mcpManager.sendSuccess(id: reqId, sessionId: sid, text: "照片已上传，分析完成。")
-        }
+        // 2. 抓 MCP 待回执（分析完再回；先清状态，避免重入）
+        let mcpReqId = pendingMcpRequestId
+        let mcpSid = pendingMcpSessionId
         resetMcpState()
         
         // 3. 异步分析
@@ -905,24 +905,78 @@ class ChatViewModel: ObservableObject {
                     self.messageList.removeLast()
                 }
                 
-                // ✅ 核心修复：使用“静默注入”机制
-                // 这会调用本地 TTS 生成一段音频流发给服务器，伪装成用户在说话
-                // 服务器收到音频后，一定会回复
+                // 标记：刚交付过视觉结果（mcpDidRequestCamera 里的守卫用，
+                // 屏蔽服务器随后误触发的 take_photo）
+                self.lastVisionDeliveredAt = Date()
                 
-                // 提示词按视觉设置里的模板拼（默认：小智视角直接描述所见）；
-                // showBubble: false，不在聊天里显示这句提示词，看起来就是小智直接看到了照片
-                let prompt = AppConfig.renderVisionPrompt(description: result)
-                self.injectVoiceCommand(text: prompt, showBubble: false)
+                if let reqId = mcpReqId, let sid = mcpSid {
+                    // A. MCP 触发的拍照：识别结果直接作为工具回执发回服务器。
+                    // 工具回执是“已完成的观察”，大模型只会据此回复，不会再调 take_photo。
+                    // 绝不能走 injectVoiceCommand：语音注入会伪装成用户又说了一句关于照片的话，
+                    // 大模型一听“照片/图”就再次调 take_photo，相机反复弹出（build 109 的教训）。
+                    // 提示词模板仍用于拼这条回执（工具回执里出现“照片”二字无妨，因为它不是用户发言）。
+                    let reply = AppConfig.renderVisionPrompt(description: result)
+                    mcpManager.sendSuccess(id: reqId, sessionId: sid, text: reply)
+                } else {
+                    // B. 用户主动拍照/选图：走 WebSocket 文本消息直接发给小智，不走语音注入。
+                    // 内容只发净化后的画面描述（去掉“照片/图片/图/拍”等触发词），不用提示词模板，
+                    // 再包一层系统提示，让大模型把它当成已给出的信息直接回复，而不是“用户要它去看”。
+                    var clean = Self.sanitizeVisionDescription(result)
+                    if clean.isEmpty { clean = result }
+                    self.sendVisionResultAsText(clean)
+                }
                 
             } catch {
                 print("Vision Error: \(error)")
                 if let last = self.messageList.last, last.text.contains("正在识别") {
                     self.messageList.removeLast()
                 }
-                let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-                self.speakLocally(text: "图片识别失败：\(reason)")
+                if let reqId = mcpReqId, let sid = mcpSid {
+                    // MCP 任务失败也要回执，否则服务器会一直等工具结果
+                    mcpManager.sendError(id: reqId, sessionId: sid, message: "图片识别失败")
+                } else {
+                    let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.speakLocally(text: "图片识别失败：\(reason)")
+                }
             }
         }
+    }
+    
+    // MARK: - 视觉结果交付（防相机误触发）
+    
+    /// 净化视觉识别结果：去掉“照片/图片/图/拍”等会触发小智调相机的词。
+    /// “图”只去固定搭配（图中/图里/这张图），不单字去，以免误伤“地图/图案”等词；
+    /// “看”也不动（“看起来”是形容词，大模型能分清它和“看一下”的区别）。
+    static func sanitizeVisionDescription(_ text: String) -> String {
+        var out = text
+        // 长短语在前，避免短的先切坏长的
+        let phrases = [
+            "这张照片", "这张图片", "这幅照片", "这幅图片", "这图", "此图",
+            "照片里", "照片中", "照片上", "照片显示", "照片",
+            "图片里", "图片中", "图片上", "图片显示", "图片",
+            "画面里", "画面中", "画面上", "画面显示", "画面",
+            "图中", "图里", "图上", "这张图",
+            "拍照", "拍摄", "拍一张",
+            "镜头里", "镜头中"
+        ]
+        for p in phrases {
+            out = out.replacingOccurrences(of: p, with: "")
+        }
+        while out.contains("  ") { out = out.replacingOccurrences(of: "  ", with: " ") }
+        out = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        while let first = out.first, "，。、：；".contains(first) {
+            out.removeFirst()
+        }
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
+    /// 把视觉结果以 WebSocket 文本消息直接发给服务器（不走语音注入）。
+    /// 与 injectVoiceCommand 的区别：这条是打字消息，不是伪装的用户语音；
+    /// 内容经净化且包在系统提示里，大模型把它当成已给出的信息直接回复。
+    private func sendVisionResultAsText(_ description: String) {
+        guard let sid = currentSessionId else { return }
+        let text = "(系统提示：用户身边的内容是：\(description)。请直接回复，不要调用任何工具。)"
+        sendJson(["session_id": sid, "type": "text", "text": text])
     }
 //    func processCapturedImage(base64Str: String) {
 //        self.showCamera = false
@@ -1349,6 +1403,16 @@ extension ChatViewModel: MCPManagerDelegate {
     
     func mcpDidRequestCamera(requestId: Int, sessionId: String, taskType: VisionTaskType) {
         print(">>> Delegate: Camera Requested")
+        
+        // 守卫：刚交付过视觉结果（15 秒内）的分析类拍照请求，几乎一定是误触发，直接忽略。
+        // 背景：识别结果发给服务器后，大模型可能又把“照片”当成新的“要看”请求，再次调 take_photo，
+        // 导致相机反复弹出。真正的“再看一次”请求不会在 15 秒内紧接着来；
+        // 用户真想再拍照，15 秒后重说一次即可。发布小红书（.publishXhs）不受守卫影响。
+        if taskType == .analyze, let last = lastVisionDeliveredAt, Date().timeIntervalSince(last) < 15 {
+            print(">>> 🛡️ 守卫：刚交付视觉结果，忽略误触发的 take_photo")
+            mcpManager.sendSuccess(id: requestId, sessionId: sessionId, text: "照片已分析过，无需再次拍照。")
+            return
+        }
         
         self.pendingMcpRequestId = requestId
         self.pendingMcpSessionId = sessionId
