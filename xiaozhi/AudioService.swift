@@ -1,4 +1,11 @@
-// 文件: AudioService.swift (v14 - 路由监听修复版)
+// 文件: AudioService.swift (v15 - 麦克风按需占用版)
+//
+// 改动说明：
+// 旧版在 init 里就立刻 setupAndStartEngine（setCategory(.playAndRecord) +
+// setActive(true) + engine.start()），导致 App 一启动就占用麦克风，
+// 纯文字聊天、待机时麦克风指示灯也一直亮着。
+// 新版改为懒启动：只有真正需要语音（按住说话、免提聆听、播放 AI 回复）时
+// 才激活音频会话；录音/播放都停了且空闲时立刻 setActive(false) 释放麦克风。
 
 @preconcurrency import AVFoundation
 import Foundation
@@ -41,14 +48,17 @@ class AudioService {
     private var injectionEncoder: OpaquePointer?
     private var injectionBufferCache = Data()
     private var injectionConverter: AVAudioConverter?
+
+    /// 音频引擎是否已配置（节点已连接、session 类别已设置）。
+    /// 注意：配置好不等于会话处于激活状态；空闲时会话会被释放，下次使用时重新激活。
+    private var engineConfigured = false
+    private var setupTask: Task<Void, Never>?
     
     private init() {
         // ✅ 监听系统路由变化 (一旦系统切回听筒，我们马上切回来)
         NotificationCenter.default.addObserver(self, selector: #selector(handleRouteChange), name: AVAudioSession.routeChangeNotification, object: nil)
-        
-        Task.detached(priority: .userInitiated) {
-            await self.setupAndStartEngine()
-        }
+        // 注意：这里不再立刻启动音频引擎。麦克风只在真正需要语音时才打开，
+        // 纯文字聊天、待机时不占用麦克风（见 ensureEngineReady / releaseAudioSessionIfIdle）。
     }
     
     deinit {
@@ -72,8 +82,38 @@ class AudioService {
         }
     }
     
-    private func setupAndStartEngine() async {
-        guard !engine.isRunning else { return }
+    /// 确保音频引擎可用：首次使用时做完整配置（会弹麦克风权限），
+    /// 之后空闲释放过会话的，只需重新激活会话并启动引擎。
+    private func ensureEngineReady() async {
+        if engineConfigured {
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch {
+                print("‼️ AudioSession reactivate failed: \(error.localizedDescription)")
+                return
+            }
+            if !engine.isRunning {
+                try? engine.start()
+            }
+            return
+        }
+        if let task = setupTask {
+            await task.value
+            return
+        }
+        let task = Task { await self.performEngineSetup() }
+        setupTask = task
+        await task.value
+        setupTask = nil
+    }
+    
+    /// 首次完整配置：设 session 类别、激活、连节点、装播放音量 tap、启动引擎。
+    /// 只有真正需要语音（录音/播放）时才会被调用，不在 App 启动时跑。
+    private func performEngineSetup() async {
+        guard !engine.isRunning else {
+            engineConfigured = true
+            return
+        }
         
         do {
             let audioSession = AVAudioSession.sharedInstance()
@@ -126,6 +166,7 @@ class AudioService {
             
             engine.prepare()
             try engine.start()
+            engineConfigured = true
             
             // ✅✅✅ 修改 2: 延时强制切换 ✅✅✅
             // 引擎启动需要时间，启动瞬间系统会重置路由，所以要延时一会再设置
@@ -139,8 +180,23 @@ class AudioService {
         }
     }
     
+    /// 空闲时释放音频会话：录音和播放都停了，就把麦克风还给系统。
+    /// 纯文字聊天、待机时调用此方法后，麦克风指示灯熄灭，不再占用。
+    private func releaseAudioSessionIfIdle() {
+        guard engineConfigured, !isRecording, !isPlaying else { return }
+        engine.stop()
+        do {
+            try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            print(">>> 🎤 Audio session released (idle, mic free)")
+        } catch {
+            print("‼️ AudioSession deactivate failed: \(error.localizedDescription)")
+        }
+    }
+    
     // ✅ 强力切扬声器
     func forceSpeaker() {
+        // 会话未激活时不碰路由，避免空闲时意外重新占用麦克风
+        guard engine.isRunning else { return }
         let session = AVAudioSession.sharedInstance()
         
         // 1. 如果已经有耳机/蓝牙连接，不要强制切扬声器，否则用户体验很差
@@ -173,8 +229,20 @@ class AudioService {
     
     // MARK: - 录音
     func startRecording() {
-        if !engine.isRunning { try? engine.start() }
         guard !isRecording else { return }
+        if engineConfigured {
+            installRecordingTap()
+            return
+        }
+        // 引擎还没配好：先懒配置（会弹麦克风权限），配好后再装 tap 开始录音
+        Task { await self.ensureEngineReady(); await MainActor.run { self.installRecordingTap() } }
+    }
+
+    /// 真正装输入 tap 开始录音（调用前确保引擎已配置并启动）
+    private func installRecordingTap() {
+        guard !isRecording else { return }
+        if !engine.isRunning { try? engine.start() }
+        guard engine.isRunning else { return }
         
         // 再次确认扬声器
         forceSpeaker()
@@ -233,12 +301,26 @@ class AudioService {
             opus_encoder_destroy(encoder)
             self.opusEncoder = nil
         }
+        // 录音停了且没在放音：释放会话，麦克风还给系统
+        releaseAudioSessionIfIdle()
     }
     
     // MARK: - 播放
     func prepareToPlay() {
-        if !engine.isRunning { try? engine.start() }
         guard !isPlaying else { return }
+        if engineConfigured {
+            startPlayback()
+            return
+        }
+        // 引擎还没配好：先懒配置，配好后再起播放器
+        Task { await self.ensureEngineReady(); await MainActor.run { self.startPlayback() } }
+    }
+
+    /// 真正创建解码器并启动播放器（调用前确保引擎已配置并启动）
+    private func startPlayback() {
+        guard !isPlaying else { return }
+        if !engine.isRunning { try? engine.start() }
+        guard engine.isRunning else { return }
         
         var opusError: opus_int32 = 0
         opusDecoder = opus_decoder_create(opus_int32(playbackSampleRate), 1, &opusError)
@@ -302,6 +384,8 @@ class AudioService {
             opus_decoder_destroy(decoder)
             opusDecoder = nil
         }
+        // 播放停了且没在录音：释放会话，麦克风还给系统
+        releaseAudioSessionIfIdle()
     }
     
     func resetEngine() {
@@ -309,6 +393,9 @@ class AudioService {
         stopPlaying()
         engine.stop()
         engine.reset()
+        // reset 会清掉节点连接，下次使用要重新完整配置
+        engineConfigured = false
+        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
     
     // (保留注入编码器相关方法...)
