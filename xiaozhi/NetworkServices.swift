@@ -284,7 +284,7 @@ class VisionService {
         guard !apiKey.isEmpty else { throw NetworkServiceError.missingZhipuAPIKey }
         guard let url = URL(string: AppConfig.visionEndpoint) else { throw URLError(.badURL) }
 
-        let prompt = "请用简练自然的中文描述画面内容。如果图片有文字，请同时提取重要文字。"
+        let prompt = "请用简练自然的中文直接描述内容本身，不要用'照片'、'图片'、'画面'、'图'这些词。如果图片有文字，请同时提取重要文字。"
         let type = AppConfig.visionAPIType
         let body: [String: Any]
         switch type {
