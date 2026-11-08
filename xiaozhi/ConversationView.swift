@@ -581,16 +581,103 @@ private struct ModelSelectorSheet: View {
 }
 
 private struct ServiceSettingsSheet: View {
-    @AppStorage(AppConfig.visionEndpointKey) private var visionEndpoint = AppConfig.zhipuEndpoint
+    @AppStorage(AppConfig.visionAPIBaseURLKey) private var baseURL = ""
+    @AppStorage(AppConfig.visionAPITypeKey) private var apiTypeRaw = VisionAPIType.chat.rawValue
     @AppStorage(AppConfig.visionModelKey) private var visionModel = "glm-4v-flash"
     @Environment(\.dismiss) private var dismiss
     @State private var apiKey = AppConfig.visionAPIKey
     @State private var showKey = false
+    @State private var fetchedModels: [String] = []
+    @State private var isFetchingModels = false
+    @State private var modelFetchError: String? = nil
+    @State private var isTesting = false
+    @State private var testResult: String? = nil
+    @State private var testSucceeded: Bool? = nil
+
+    private var apiType: VisionAPIType {
+        VisionAPIType(rawValue: apiTypeRaw) ?? .chat
+    }
+
+    private var apiTypeBinding: Binding<VisionAPIType> {
+        Binding(
+            get: { apiType },
+            set: { apiTypeRaw = $0.rawValue }
+        )
+    }
+
+    private var trimmedBaseURL: String {
+        baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedKey: String {
+        apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedModel: String {
+        visionModel.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     private var canSave: Bool {
-        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !visionEndpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-        !visionModel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        !trimmedKey.isEmpty &&
+        !trimmedBaseURL.isEmpty &&
+        !trimmedModel.isEmpty
+    }
+
+    private var canFetchModels: Bool {
+        !trimmedBaseURL.isEmpty && !trimmedKey.isEmpty && !isFetchingModels
+    }
+
+    private var canTest: Bool {
+        canSave && !isTesting
+    }
+
+    /// 首次打开时，把旧版存的完整接口地址迁移成基础地址 + 类型
+    private func migrateLegacyEndpointIfNeeded() {
+        guard trimmedBaseURL.isEmpty else { return }
+        let legacy = UserDefaults.standard.string(forKey: AppConfig.visionEndpointKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !legacy.isEmpty, legacy != AppConfig.zhipuEndpoint else { return }
+        baseURL = AppConfig.normalizeVisionBaseURL(legacy)
+        if legacy.hasSuffix("/responses") {
+            apiTypeRaw = VisionAPIType.responses.rawValue
+        } else if legacy.hasSuffix("/chat/completions") {
+            apiTypeRaw = VisionAPIType.chat.rawValue
+        }
+    }
+
+    private func fetchModels() async {
+        isFetchingModels = true
+        modelFetchError = nil
+        do {
+            let models = try await VisionService.fetchModels(baseURL: baseURL, apiKey: apiKey)
+            fetchedModels = models
+            if models.isEmpty {
+                modelFetchError = "接口没有返回任何模型，请检查地址和 Key，或手动输入模型名。"
+            } else if trimmedModel.isEmpty {
+                visionModel = models[0]
+            }
+        } catch {
+            fetchedModels = []
+            modelFetchError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        isFetchingModels = false
+    }
+
+    private func runTest() async {
+        isTesting = true
+        testResult = nil
+        testSucceeded = nil
+        do {
+            let reply = try await VisionService.testConnectivity(
+                baseURL: baseURL, apiKey: apiKey, model: visionModel, type: apiType
+            )
+            testSucceeded = true
+            testResult = "连接成功，模型回复：\(reply)"
+        } catch {
+            testSucceeded = false
+            testResult = "连接失败：\((error as? LocalizedError)?.errorDescription ?? error.localizedDescription)"
+        }
+        isTesting = false
     }
 
     var body: some View {
@@ -632,35 +719,116 @@ private struct ServiceSettingsSheet: View {
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("视觉模型")
+                    Text("请求地址")
                         .font(.headline)
-                    TextField("模型名称，例如 glm-4v-flash", text: $visionModel)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .padding(12)
-                        .background(Color(uiColor: .systemGray6))
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
-                    Text("支持 OpenAI 兼容的视觉对话接口。")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("视觉接口地址")
-                        .font(.headline)
-                    TextField("https://api.example.com/v1/chat/completions", text: $visionEndpoint)
+                    TextField("https://agentrouter.698668.xyz/v1", text: $baseURL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
                         .padding(12)
                         .background(Color(uiColor: .systemGray6))
                         .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Text("只填基础地址，不用加 /chat/completions 或 /responses，App 会按 API 类型自动拼。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("API 类型")
+                        .font(.headline)
+                    Picker("API 类型", selection: apiTypeBinding) {
+                        ForEach(VisionAPIType.allCases) { type in
+                            Text(type.displayName).tag(type)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    Text("只支持 Responses 的模型（例如 AgentRouter 的 gpt-6.1-sol）请选 Responses。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("视觉模型")
+                        .font(.headline)
+                    Button {
+                        Task { await fetchModels() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isFetchingModels {
+                                ProgressView()
+                            }
+                            Text(isFetchingModels ? "正在获取…" : "获取模型列表")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .foregroundStyle(.white)
+                        .background(canFetchModels ? Color.blue : Color.gray)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .disabled(!canFetchModels)
+                    if let modelFetchError {
+                        Text(modelFetchError)
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                    if !fetchedModels.isEmpty {
+                        Picker("选择模型", selection: $visionModel) {
+                            ForEach(fetchedModels, id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(Color(uiColor: .systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    TextField("模型名称，例如 glm-4v-flash", text: $visionModel)
+                        .textInputAutocapitalization(.never)
+                        .autocorrectionDisabled()
+                        .padding(12)
+                        .background(Color(uiColor: .systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Text("拉不到列表时也可以手动输入模型名。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("连通性测试")
+                        .font(.headline)
+                    Button {
+                        Task { await runTest() }
+                    } label: {
+                        HStack(spacing: 6) {
+                            if isTesting {
+                                ProgressView()
+                            }
+                            Text(isTesting ? "正在测试…" : "测试连通性")
+                                .fontWeight(.semibold)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 11)
+                        .foregroundStyle(.white)
+                        .background(canTest ? Color.green : Color.gray)
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    }
+                    .disabled(!canTest)
+                    if let testResult {
+                        Text(testResult)
+                            .font(.caption)
+                            .foregroundStyle(testSucceeded == true ? .green : .red)
+                    } else {
+                        Text("用当前地址、Key、类型和模型发一次最短的纯文本请求，不发图。")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Button {
-                    let trimmedKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-                    visionModel = visionModel.trimmingCharacters(in: .whitespacesAndNewlines)
-                    visionEndpoint = visionEndpoint.trimmingCharacters(in: .whitespacesAndNewlines)
+                    visionModel = trimmedModel
+                    baseURL = trimmedBaseURL
                     _ = KeychainHelper.save(key: AppConfig.visionAPIKeyKey, string: trimmedKey)
                     dismiss()
                 } label: {
@@ -676,6 +844,9 @@ private struct ServiceSettingsSheet: View {
                 .opacity(canSave ? 1 : 0.45)
             }
             .padding(22)
+        }
+        .onAppear {
+            migrateLegacyEndpointIfNeeded()
         }
     }
 }
