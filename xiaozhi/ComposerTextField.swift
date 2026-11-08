@@ -50,6 +50,17 @@ final class ComposerTextFieldStore {
         field.text = ""
         field.sendActions(for: .editingChanged)
     }
+
+    /// Focus the field (e.g. returning to text mode). Direct UIKit call —
+    /// never via a SwiftUI state round-trip (see updateUIView note below).
+    func focusKeyboard() {
+        textField?.becomeFirstResponder()
+    }
+
+    /// Dismiss the keyboard (e.g. entering push-to-talk, tapping Live2D).
+    func resignKeyboard() {
+        textField?.resignFirstResponder()
+    }
 }
 
 /// A real UITextField in SwiftUI, so send can read the field directly.
@@ -97,16 +108,26 @@ struct ComposerTextField: UIViewRepresentable {
         // struct; the closure captured at makeCoordinator time may go stale).
         context.coordinator.onSubmit = onSubmit
         context.coordinator.isFocused = $isFocused
-        // Sync binding -> field only when they differ, so the cursor never jumps.
-        if uiView.text != text {
+        // Sync binding -> field ONLY when the field is not being edited.
+        // While the user is typing the field is the source of truth; writing
+        // the (possibly lagging) binding back here wipes in-flight keystrokes.
+        if !uiView.isFirstResponder && uiView.text != text {
             uiView.text = text
         }
-        // Drive focus from SwiftUI state (Live2D tap / mode switches set it).
-        if isFocused && !uiView.isFirstResponder {
-            uiView.becomeFirstResponder()
-        } else if !isFocused && uiView.isFirstResponder {
-            uiView.resignFirstResponder()
-        }
+        // NOTE: focus is deliberately NOT driven here. build 99 drove focus
+        // from the round-tripped SwiftUI isFocused state in updateUIView
+        // (become/resignFirstResponder based on it), and updateUIView runs on
+        // every keystroke (each keystroke writes the binding -> parent
+        // re-renders -> updateUIView). Since build 96 dropped SwiftUI's
+        // `.focused($isComposerFocused)` modifier, the @FocusState is no
+        // longer owned by SwiftUI's focus system, so the value updateUIView
+        // reads can be false while the field is actually first responder —
+        // and updateUIView then called resignFirstResponder() on a live
+        // field: the keyboard dismissed itself on the first keystroke and
+        // the typed character was lost. Focus is now managed only by UIKit
+        // (user taps the field) and by explicit store.focusKeyboard() /
+        // resignKeyboard() calls for mode switches; the delegate callbacks
+        // below only mirror the state for SwiftUI, they never drive it.
     }
 
     func makeCoordinator() -> Coordinator {
