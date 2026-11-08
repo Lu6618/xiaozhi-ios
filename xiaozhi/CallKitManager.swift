@@ -43,8 +43,9 @@ final class CallKitManager: NSObject {
     var isCallActive: Bool { currentCallUUID != nil }
 
     private override init() {
-        let config = CXProviderConfiguration()
-        config.localizedName = "小智"
+        // init(localizedName:) 在 iOS 14 标记废弃，但 localizedName 是只读属性，
+        // 只能经由这个构造器设定（无参构造器 + 赋值编译不过），废弃警告可忽略。
+        let config = CXProviderConfiguration(localizedName: "小智")
         config.supportsVideo = false
         config.maximumCallsPerCallGroup = 1
         config.supportedHandleTypes = [.generic]
