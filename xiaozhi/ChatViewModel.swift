@@ -472,10 +472,41 @@ class ChatViewModel: ObservableObject {
 
         messageList.append(ChatMessage(text: content, type: .sent))
 
-        // 小智服务端的完整对话链路是 listen start -> Opus -> listen stop。
-        // 直接发送 type=text 只会被部分服务端识别，因此将键盘文字转成
-        // 不外放的 TTS 音频，复用原版语音对话协议。
-        injectVoiceCommand(text: content, showBubble: true)
+        // 对话里生图：先过一个快速本地门控（只有可能与生图有关才问模型，避免每次对话都多一次调用），
+        // 再让配置的大模型判断是不是生图请求并提炼描述；是则走生图，否则走原来的小智语音对话。
+        guard ImageGenerationService.mightBeImageRequest(content) else {
+            injectVoiceCommand(text: content, showBubble: true)
+            return
+        }
+        Task {
+            if let prompt = await ImageGenerationService.shared.detectImagePrompt(for: content) {
+                await self.generateImageFromChat(prompt: prompt)
+            } else {
+                await MainActor.run { self.injectVoiceCommand(text: content, showBubble: true) }
+            }
+        }
+    }
+
+    /// 对话里触发的生图：用服务设置里的同一套配置生成图片，显示在对话里
+    @MainActor
+    private func generateImageFromChat(prompt: String) async {
+        let loading = ChatMessage(text: "🎨 正在生成图片…", type: .received)
+        messageList.append(loading)
+        do {
+            let data = try await ImageGenerationService.shared.generateWithVisionConfig(prompt: prompt)
+            guard let image = UIImage(data: data) else { throw ImageGenerationError.invalidResponse }
+            if let idx = messageList.firstIndex(where: { $0.id == loading.id }) {
+                messageList[idx] = ChatMessage(text: "图片已生成", type: .received, image: image)
+            } else {
+                messageList.append(ChatMessage(text: "图片已生成", type: .received, image: image))
+            }
+        } catch {
+            if let idx = messageList.firstIndex(where: { $0.id == loading.id }) {
+                messageList.remove(at: idx)
+            }
+            let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            speakLocally(text: "生图失败：\(reason)")
+        }
     }
 
     @MainActor
