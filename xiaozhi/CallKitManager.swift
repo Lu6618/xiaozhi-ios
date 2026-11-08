@@ -27,24 +27,6 @@ struct XiaozhiCallError: LocalizedError {
     var errorDescription: String? { message }
 }
 
-/// 单次 resume 保护：request 回调、perform 回调、超时任务都可能触发 resume，只让第一个生效。
-private final class ResumeBox<T>: @unchecked Sendable {
-    private var continuation: CheckedContinuation<T, Never>?
-    private let lock = NSLock()
-
-    init(_ continuation: CheckedContinuation<T, Never>) {
-        self.continuation = continuation
-    }
-
-    func resume(with value: T) {
-        lock.lock()
-        defer { lock.unlock() }
-        guard let c = continuation else { return }
-        continuation = nil
-        c.resume(returning: value)
-    }
-}
-
 /// CallKit 事件回 ChatViewModel（单例对单例，weak 避免循环引用）。
 protocol CallKitManagerDelegate: AnyObject {
     /// 系统接受了去电请求（CXStartCallAction 已 fulfill）：可以开始连接。
@@ -77,10 +59,17 @@ final class CallKitManager: NSObject {
     var isCallActive: Bool { currentCallUUID != nil }
     /// 系统是否已递送去电的 perform（通话真正开始）。
     private var performReceived = false
-    /// 等 perform 回调的 resume 盒子（startOutgoingCall 挂起等它；request 回调 / perform / 超时三路抢 resume，只第一个生效）。
-    private var performContinuationBox: ResumeBox<StartCallOutcome>?
+    /// 等 perform 回调的 continuation（startOutgoingCall 挂起等它；request 回调 / perform / 超时三路抢 resume，只第一个生效——全部在主线程上串行，清掉后置 nil 即可保证单次 resume）。
+    private var performContinuation: CheckedContinuation<StartCallOutcome, Never>?
     /// perform 等待超时任务（10 秒总超时）。
     private var performWatchdog: Task<Void, Never>?
+
+    /// 恢复等 perform 的 continuation（只第一个生效；其余调用点直接返回）。
+    private func resumePerformContinuation(with outcome: StartCallOutcome) {
+        guard let continuation = performContinuation else { return }
+        performContinuation = nil
+        continuation.resume(returning: outcome)
+    }
 
     private override init() {
         // init(localizedName:) 在 iOS 14 标记废弃，但 localizedName 是只读属性，
@@ -109,14 +98,16 @@ final class CallKitManager: NSObject {
         action.isVideo = false
         print("📞 CallKit request start: \(uuid)")
         let outcome: StartCallOutcome = await withCheckedContinuation { continuation in
-            let box = ResumeBox(continuation)
-            performContinuationBox = box
+            performContinuation = continuation
             callController.request(CXTransaction(action: action)) { requestError in
-                if let requestError {
-                    print("‼️ CallKit request failed: \(requestError.localizedDescription)")
-                    box.resume(with: .rejected(requestError.localizedDescription))
-                } else {
-                    print("📞 CallKit request accepted, waiting for perform…")
+                // request 回调可能不在主线程：跳回主线程再 resume（所有 resume 点都在主线程上串行）。
+                Task { @MainActor in
+                    if let requestError {
+                        print("‼️ CallKit request failed: \(requestError.localizedDescription)")
+                        self.resumePerformContinuation(with: .rejected(requestError.localizedDescription))
+                    } else {
+                        print("📞 CallKit request accepted, waiting for perform…")
+                    }
                 }
             }
             // 10 秒总超时：request 没回、perform 没到都算超时，绝不让 intent 无声挂起。
@@ -125,10 +116,9 @@ final class CallKitManager: NSObject {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
                 guard !Task.isCancelled else { return }
                 print("⏰ CallKit start timed out after 10s (no perform)")
-                box.resume(with: .timedOut)
+                self.resumePerformContinuation(with: .timedOut)
             }
         }
-        performContinuationBox = nil
         performWatchdog?.cancel()
         performWatchdog = nil
         switch outcome {
@@ -182,8 +172,7 @@ final class CallKitManager: NSObject {
         print("⚠️ CallKit resetting stale call: \(String(describing: currentCallUUID))")
         performWatchdog?.cancel()
         performWatchdog = nil
-        performContinuationBox?.resume(with: .timedOut)
-        performContinuationBox = nil
+        resumePerformContinuation(with: .timedOut)
         currentCallUUID = nil
         performReceived = false
     }
@@ -211,8 +200,7 @@ extension CallKitManager: CXProviderDelegate {
         // Provider 被系统重置：有通话就按挂断收尾。
         performWatchdog?.cancel()
         performWatchdog = nil
-        performContinuationBox?.resume(with: .rejected("系统重置了通话"))
-        performContinuationBox = nil
+        resumePerformContinuation(with: .rejected("系统重置了通话"))
         if currentCallUUID != nil {
             currentCallUUID = nil
             performReceived = false
@@ -231,9 +219,7 @@ extension CallKitManager: CXProviderDelegate {
         performReceived = true
         performWatchdog?.cancel()
         performWatchdog = nil
-        let box = performContinuationBox
-        performContinuationBox = nil
-        box?.resume(with: .performed)
+        resumePerformContinuation(with: .performed)
         delegate?.callKitDidPerformStartCall()
     }
 
@@ -264,8 +250,7 @@ extension CallKitManager: CXProviderDelegate {
         print("‼️ CallKit action timed out: \(type(of: action))")
         performWatchdog?.cancel()
         performWatchdog = nil
-        performContinuationBox?.resume(with: .timedOut)
-        performContinuationBox = nil
+        resumePerformContinuation(with: .timedOut)
         if currentCallUUID != nil {
             currentCallUUID = nil
             performReceived = false
