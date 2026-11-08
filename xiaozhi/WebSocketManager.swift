@@ -32,6 +32,7 @@ class WebSocketManager : NSObject {
     
     private var reconnectAttempts = 0
     private var isManuallyClosed = false // 标记是否是用户主动断开
+    private var reconnectScheduled = false // 防止同一断线重复排期重连
     
     override private init() {
         super.init()
@@ -56,6 +57,7 @@ class WebSocketManager : NSObject {
         
         // 重置标志位
         self.isManuallyClosed = false
+        self.reconnectScheduled = false
         
         var request = URLRequest(url: url)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
@@ -80,6 +82,7 @@ class WebSocketManager : NSObject {
         // 1. 标记手动关闭，防止触发重连和报错日志
         isManuallyClosed = true
         isConnected = false
+        reconnectScheduled = false
         stopHeartbeat()
         
         // 2. 发送关闭帧
@@ -144,27 +147,47 @@ class WebSocketManager : NSObject {
         }
     }
     
+    /// 回前台立即重连：用缓存的连接参数直接重连，不等指数退避。
+    /// 从未连上过（无缓存参数）时静默返回，调用方再走完整 OTA 流程。
+    func reconnectNow() {
+        guard !isManuallyClosed,
+              let url = lastURL, let token = lastToken,
+              let deviceId = lastDeviceId, let clientId = lastClientId else { return }
+        print(">>> 🔄 [WS] Foreground reconnect now")
+        reconnectAttempts = 0
+        reconnectScheduled = false
+        connect(url: url, token: token, deviceId: deviceId, clientId: clientId)
+    }
+    
     private func handleDisconnection(reason: String) {
-        guard isConnected else { return }
+        // 旧版这里 guard isConnected else return：后台被系统静默杀掉 socket 时
+        // isConnected 可能已经是 false（或 close 事件根本没到），导致一次重连都不排期，
+        // 回前台后一直显示未连接。用 reconnectScheduled 去重，而不是用 isConnected 拦截。
+        let wasConnected = isConnected
         isConnected = false
         stopHeartbeat()
         
-        DispatchQueue.main.async {
-            self.delegate?.webSocketDidDisconnect(reason: reason)
+        if wasConnected {
+            DispatchQueue.main.async {
+                self.delegate?.webSocketDidDisconnect(reason: reason)
+            }
         }
         
-        if !isManuallyClosed {
+        if !isManuallyClosed && !reconnectScheduled {
             scheduleReconnect()
         }
     }
     
     private func scheduleReconnect() {
+        reconnectScheduled = true
         reconnectAttempts += 1
         let delay = min(pow(2.0, Double(reconnectAttempts)), 30.0)
         print("Scheduling reconnect attempt \(reconnectAttempts) in \(delay) seconds.")
         
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
-            guard let self = self, !self.isConnected, !self.isManuallyClosed else { return }
+            guard let self = self else { return }
+            self.reconnectScheduled = false
+            guard !self.isConnected, !self.isManuallyClosed else { return }
             if let url = self.lastURL, let token = self.lastToken, let deviceId = self.lastDeviceId, let clientId = self.lastClientId {
                 DispatchQueue.main.async {
                     self.connect(url: url, token: token, deviceId: deviceId, clientId: clientId)
@@ -241,6 +264,7 @@ extension WebSocketManager: URLSessionWebSocketDelegate {
         DispatchQueue.main.async {
             self.isConnected = true
             self.reconnectAttempts = 0
+            self.reconnectScheduled = false
             self.sendHello()
             self.startHeartbeat()
             self.delegate?.webSocketDidConnect()
