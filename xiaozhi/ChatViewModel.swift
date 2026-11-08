@@ -918,12 +918,16 @@ class ChatViewModel: ObservableObject {
                     let reply = AppConfig.renderVisionPrompt(description: result)
                     mcpManager.sendSuccess(id: reqId, sessionId: sid, text: reply)
                 } else {
-                    // B. 用户主动拍照/选图：走 WebSocket 文本消息直接发给小智，不走语音注入。
-                    // 内容只发净化后的画面描述（去掉“照片/图片/图/拍”等触发词），不用提示词模板，
-                    // 再包一层系统提示，让大模型把它当成已给出的信息直接回复，而不是“用户要它去看”。
+                    // B. 用户主动拍照/选图：走语音注入（injectVoiceCommand）发给小智。
+                    // 注意：冷发的 {"type": "text"} 文本消息在服务端没有对应的处理器，
+                    // 会被静默丢弃、小智永远不回（build 112 的教训：图片识别不返回任何内容）。
+                    // 语音注入是 App 里唯一能让服务器回话的路径（打字消息也走这条路）。
+                    // 内容只发净化后的画面描述（去掉“照片/图片/图/拍”等触发词），
+                    // 末尾加“你觉得怎么样？”让小智直接给看法、不去调工具；
+                    // showBubble=false，用户只看到照片和小智的回复。
                     var clean = Self.sanitizeVisionDescription(result)
                     if clean.isEmpty { clean = result }
-                    self.sendVisionResultAsText(clean)
+                    self.injectVoiceCommand(text: "\(clean)。你觉得怎么样？", showBubble: false)
                 }
                 
             } catch {
@@ -969,15 +973,7 @@ class ChatViewModel: ObservableObject {
         }
         return out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-    
-    /// 把视觉结果以 WebSocket 文本消息直接发给服务器（不走语音注入）。
-    /// 与 injectVoiceCommand 的区别：这条是打字消息，不是伪装的用户语音；
-    /// 内容经净化且包在系统提示里，大模型把它当成已给出的信息直接回复。
-    private func sendVisionResultAsText(_ description: String) {
-        guard let sid = currentSessionId else { return }
-        let text = "(系统提示：用户身边的内容是：\(description)。请直接回复，不要调用任何工具。)"
-        sendJson(["session_id": sid, "type": "text", "text": text])
-    }
+
 //    func processCapturedImage(base64Str: String) {
 //        self.showCamera = false
 //        
