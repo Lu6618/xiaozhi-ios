@@ -14,7 +14,8 @@ struct ConversationView: View {
     @StateObject private var audioMonitor = AudioVolumeMonitor()
     @StateObject private var live2DController = Live2DController()
     @StateObject private var settings = Live2DSettings.shared
-    @StateObject private var composerStore = ComposerTextFieldStore()
+    // Plain class (not ObservableObject — it publishes nothing), so @State, not @StateObject.
+    @State private var composerStore = ComposerTextFieldStore()
 
     @State private var messageText = ""
     @State private var mode: ConversationUIMode = .pushToTalk
@@ -322,7 +323,9 @@ struct ConversationView: View {
                 // 不再读 SwiftUI 绑定快照。旧的 SwiftUI TextField 用 axis: .vertical，
                 // 底层是 UITextView，build 90 的 `as? UITextField` 查找永远失败、
                 // 永远回退到滞后的绑定——这就是打完字立刻发丢尾巴的原因。
-                ComposerTextField(text: $messageText, isFocused: $isComposerFocused, store: composerStore, onSubmit: sendMessage)
+                // 注意：$isComposerFocused 是 FocusState.Binding，不是 Binding<Bool>，
+                // 须经 composerFocusBinding 桥接才能传给 UIViewRepresentable。
+                ComposerTextField(text: $messageText, isFocused: composerFocusBinding, store: composerStore, onSubmit: sendMessage)
 
                 // 发送按钮固定嵌在输入框内部右侧：有文字时蓝色可点，没文字时灰色不可点
                 Button(action: sendMessage) {
@@ -443,6 +446,15 @@ struct ConversationView: View {
     private func openCamera() {
         chatVM.cancelCamera()
         chatVM.showCamera = true
+    }
+
+    /// @FocusState 桥接成普通 Binding<Bool>（FocusState.Binding 不是 Binding<Bool>，
+    /// 不能直接传给 UIViewRepresentable）。
+    private var composerFocusBinding: Binding<Bool> {
+        Binding(
+            get: { isComposerFocused },
+            set: { isComposerFocused = $0 }
+        )
     }
 
     private var isComposerEmpty: Bool {
