@@ -326,6 +326,10 @@ struct ConversationView: View {
                 // 注意：$isComposerFocused 是 FocusState.Binding，不是 Binding<Bool>，
                 // 须经 composerFocusBinding 桥接才能传给 UIViewRepresentable。
                 ComposerTextField(text: $messageText, isFocused: composerFocusBinding, store: composerStore, onSubmit: sendMessage)
+                    // 定死高度：光有 sizeThatFits 还不够，再加一层 frame 兜底。
+                    // build 96 漏了高度约束，UITextField 被 SwiftUI 纵向拉满整屏，
+                    // 输入框变成全屏大圆角白框、盖住聊天记录（Lu 16:26 截图）。
+                    .frame(height: 36)
 
                 // 发送按钮固定嵌在输入框内部右侧：有文字时蓝色可点，没文字时灰色不可点
                 Button(action: sendMessage) {
