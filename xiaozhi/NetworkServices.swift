@@ -493,6 +493,62 @@ class MapService {
 }
 
 // ----------------------------------------------------------------
+// MARK: - 高德地图导航（打开系统高德 App）
+// ----------------------------------------------------------------
+
+/// 用 iOS URL Scheme 打开系统高德地图导航。
+/// 高德 App 需安装（Info.plist 的 LSApplicationQueriesSchemes 已含 iosamap，
+/// 否则 canOpenURL 永远返回 false）；未安装时返回 false，由调用方明确提示用户，不要静默失败。
+/// 路线规划用名字即可（高德自己地理编码，不依赖后端）；直接开始导航需要经纬度。
+/// 坐标是高德坐标系（GCJ-02），所以 dev=0。
+enum AmapNavigationService {
+    static var isAmapInstalled: Bool {
+        guard let url = URL(string: "iosamap://") else { return false }
+        return UIApplication.shared.canOpenURL(url)
+    }
+
+    /// 按名字规划路线（打开高德 App 的路线规划页，用户点“导航”即开始导航）
+    @discardableResult
+    static func openNavigationToName(_ name: String) -> Bool {
+        guard isAmapInstalled else { return false }
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "iosamap://path?sourceApplication=xiaozhi&dname=\(encoded)&dev=0&t=0") else { return false }
+        UIApplication.shared.open(url)
+        return true
+    }
+
+    /// 按经纬度直接开始导航
+    @discardableResult
+    static func openNavigation(poi: AmapPOI) -> Bool {
+        guard isAmapInstalled else { return false }
+        let encoded = poi.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "iosamap://navi?sourceApplication=xiaozhi&poiname=\(encoded)&lat=\(poi.latitude)&lon=\(poi.longitude)&dev=0&style=2") else { return false }
+        UIApplication.shared.open(url)
+        return true
+    }
+
+    /// 路线结果页用：按名字规划路线；未装高德时回退到 Apple Maps
+    @discardableResult
+    static func openRouteToName(_ name: String) -> Bool {
+        if openNavigationToName(name) { return true }
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "http://maps.apple.com/?daddr=\(encoded)") else { return false }
+        UIApplication.shared.open(url)
+        return true
+    }
+
+    /// POI 卡片用：有坐标直接高德导航；未装高德时回退到 Apple Maps
+    @discardableResult
+    static func openPOINavigation(poi: AmapPOI) -> Bool {
+        if openNavigation(poi: poi) { return true }
+        let encoded = poi.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "http://maps.apple.com/?q=\(encoded)") else { return false }
+        UIApplication.shared.open(url)
+        return true
+    }
+}
+
+// ----------------------------------------------------------------
 // MARK: - Travel Planner Service
 // ----------------------------------------------------------------
 
