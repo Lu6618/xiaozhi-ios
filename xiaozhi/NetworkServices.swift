@@ -527,6 +527,26 @@ enum AmapNavigationService {
         return true
     }
 
+    /// 打车：按名字打开高德打车页（高德自己解析地名）
+    @discardableResult
+    static func openTaxiToName(_ name: String) -> Bool {
+        guard isAmapInstalled else { return false }
+        let encoded = name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "amapuri://drive/takeTaxi?sourceApplication=xiaozhi&dname=\(encoded)") else { return false }
+        UIApplication.shared.open(url)
+        return true
+    }
+
+    /// 打车：有坐标时直接打开高德打车页（带目的地坐标，高德用当前位置当起点）
+    @discardableResult
+    static func openTaxi(poi: AmapPOI) -> Bool {
+        guard isAmapInstalled else { return false }
+        let encoded = poi.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? ""
+        guard let url = URL(string: "amapuri://drive/takeTaxi?sourceApplication=xiaozhi&dlon=\(poi.longitude)&dlat=\(poi.latitude)&dname=\(encoded)") else { return false }
+        UIApplication.shared.open(url)
+        return true
+    }
+
     /// 路线结果页用：按名字规划路线；未装高德时回退到 Apple Maps
     @discardableResult
     static func openRouteToName(_ name: String) -> Bool {
