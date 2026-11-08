@@ -178,27 +178,33 @@ class XHSService {
 // ----------------------------------------------------------------
 
 class VisionService {
-    static func analyze(base64: String) async throws -> String {
-        let apiKey = AppConfig.visionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !apiKey.isEmpty else { throw NetworkServiceError.missingZhipuAPIKey }
-        guard let url = URL(string: AppConfig.visionEndpoint) else { throw URLError(.badURL) }
-
+    /// 统一发视觉 POST 请求：返回原始 Data，非 2xx 时抛出带状态码和服务端信息的错误
+    private static func post(url: URL, body: [String: Any], apiKey: String, timeout: TimeInterval = 60) async throws -> Data {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.timeoutInterval = 60
+        request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "model": AppConfig.visionModel,
-            "stream": false,
-            "messages": [[
-                "role": "user",
-                "content": [
-                    ["type": "text", "text": "请用简练自然的中文描述画面内容。如果图片有文字，请同时提取重要文字。"],
-                    ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64)"]]
-                ]
-            ]]
-        ])
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await URLSession.shared.data(for: request)
+        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+            let message = String(data: data, encoding: .utf8) ?? ""
+            throw NetworkServiceError.httpStatus(http.statusCode, message)
+        }
+        return data
+    }
+
+    /// 拉取可用模型列表：GET <base>/models，返回 data[].id（已排序）
+    static func fetchModels(baseURL: String, apiKey: String) async throws -> [String] {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw NetworkServiceError.missingZhipuAPIKey }
+        guard let urlString = AppConfig.visionURL(path: "/models", base: baseURL),
+              let url = URL(string: urlString) else { throw URLError(.badURL) }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 30
+        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
 
         let (data, response) = try await URLSession.shared.data(for: request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
@@ -206,13 +212,112 @@ class VisionService {
             throw NetworkServiceError.httpStatus(http.statusCode, message)
         }
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let choices = json["choices"] as? [[String: Any]],
-              let message = choices.first?["message"] as? [String: Any],
-              let content = message["content"] as? String,
-              !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+              let items = json["data"] as? [[String: Any]] else {
             throw NetworkServiceError.invalidVisionResponse
         }
-        return content.trimmingCharacters(in: .whitespacesAndNewlines)
+        return items.compactMap { $0["id"] as? String }.filter { !$0.isEmpty }.sorted()
+    }
+
+    /// 一键测试连通性：用当前地址/Key/类型/模型发一次最短的纯文本请求（不发图），返回模型回复
+    static func testConnectivity(baseURL: String, apiKey: String, model: String, type: VisionAPIType) async throws -> String {
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { throw NetworkServiceError.missingZhipuAPIKey }
+        let trimmedModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedModel.isEmpty else { throw NetworkServiceError.invalidVisionResponse }
+        guard let endpoint = AppConfig.visionEndpointURL(base: baseURL, type: type),
+              let url = URL(string: endpoint) else { throw URLError(.badURL) }
+
+        let body: [String: Any]
+        switch type {
+        case .chat:
+            body = [
+                "model": trimmedModel,
+                "stream": false,
+                "messages": [["role": "user", "content": "ping"]]
+            ]
+        case .responses:
+            body = [
+                "model": trimmedModel,
+                "input": "ping"
+            ]
+        }
+        let data = try await post(url: url, body: body, apiKey: key, timeout: 30)
+        return try extractText(from: data, type: type)
+    }
+
+    static func analyze(base64: String) async throws -> String {
+        let apiKey = AppConfig.visionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else { throw NetworkServiceError.missingZhipuAPIKey }
+        guard let url = URL(string: AppConfig.visionEndpoint) else { throw URLError(.badURL) }
+
+        let prompt = "请用简练自然的中文描述画面内容。如果图片有文字，请同时提取重要文字。"
+        let type = AppConfig.visionAPIType
+        let body: [String: Any]
+        switch type {
+        case .chat:
+            body = [
+                "model": AppConfig.visionModel,
+                "stream": false,
+                "messages": [[
+                    "role": "user",
+                    "content": [
+                        ["type": "text", "text": prompt],
+                        ["type": "image_url", "image_url": ["url": "data:image/jpeg;base64,\(base64)"]]
+                    ]
+                ]]
+            ]
+        case .responses:
+            body = [
+                "model": AppConfig.visionModel,
+                "input": [[
+                    "role": "user",
+                    "content": [
+                        ["type": "input_text", "text": prompt],
+                        ["type": "input_image", "image_url": "data:image/jpeg;base64,\(base64)"]
+                    ]
+                ]]
+            ]
+        }
+
+        let data = try await post(url: url, body: body, apiKey: apiKey)
+        return try extractText(from: data, type: type)
+    }
+
+    /// 从 Chat Completions 或 Responses 的返回里取文本
+    private static func extractText(from data: Data, type: VisionAPIType) throws -> String {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NetworkServiceError.invalidVisionResponse
+        }
+        switch type {
+        case .chat:
+            if let choices = json["choices"] as? [[String: Any]],
+               let message = choices.first?["message"] as? [String: Any],
+               let content = message["content"] as? String,
+               !content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return content.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        case .responses:
+            if let output = json["output"] as? [[String: Any]] {
+                var texts: [String] = []
+                for item in output {
+                    guard item["type"] as? String == "message",
+                          let parts = item["content"] as? [[String: Any]] else { continue }
+                    for part in parts where part["type"] as? String == "output_text" {
+                        if let text = part["text"] as? String, !text.isEmpty {
+                            texts.append(text)
+                        }
+                    }
+                }
+                let joined = texts.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                if !joined.isEmpty { return joined }
+            }
+            // 有些中转会直接给 output_text 字段
+            if let text = json["output_text"] as? String,
+               !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return text.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        throw NetworkServiceError.invalidVisionResponse
     }
 
     static func uploadImage(base64: String) async throws -> String {
