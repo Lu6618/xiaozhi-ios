@@ -40,6 +40,9 @@ struct AppConfig {
     static let visionAPIKeyKey = "com.xiaozhi.vision.apiKey"
     static let visionAPIBaseURLKey = "VisionAPIBaseURL"
     static let visionAPITypeKey = "VisionAPIType"
+    static let visionPromptTemplateKey = "VisionPromptTemplate"
+    /// 发给小智的识图提示词模板（默认：小智视角直接描述所见）
+    static let defaultVisionPromptTemplate = "你看到了一张照片，照片里是：{description}。请自然地说说你看到了什么。"
     static let zhipuEndpoint = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 
     static var zhipuAPIKey: String {
@@ -113,6 +116,22 @@ struct AppConfig {
     static var visionModel: String {
         let value = UserDefaults.standard.string(forKey: visionModelKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
         return value?.isEmpty == false ? value! : zhipuModel
+    }
+
+    /// 识图后发给小智的提示词模板；没填过或被清空时用默认模板
+    static var visionPromptTemplate: String {
+        let value = UserDefaults.standard.string(forKey: visionPromptTemplateKey)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return value?.isEmpty == false ? value! : defaultVisionPromptTemplate
+    }
+
+    /// 按模板拼出识图后发给小智的提示词：
+    /// 模板含 {description} 时替换成识别结果；没有占位符时把识别结果拼在末尾
+    static func renderVisionPrompt(description: String) -> String {
+        let template = visionPromptTemplate
+        if template.contains("{description}") {
+            return template.replacingOccurrences(of: "{description}", with: description)
+        }
+        return template + " " + description
     }
 
     static var visionAPIKey: String {
