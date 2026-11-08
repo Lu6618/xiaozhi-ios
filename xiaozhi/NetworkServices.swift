@@ -178,20 +178,56 @@ class XHSService {
 // ----------------------------------------------------------------
 
 class VisionService {
-    /// 统一发视觉 POST 请求：返回原始 Data，非 2xx 时抛出带状态码和服务端信息的错误
+    /// 统一发视觉 POST 请求：返回原始 Data，非 2xx 时抛出带状态码和服务端信息的错误。
+    /// 网络抖动很常见（手机 Wi-Fi + 大图上传 + 模型慢回）：瞬时网络错误和 5xx
+    /// 自动重试，最多 3 次（间隔 1 秒、2 秒递增）；4xx 等业务错误不重试。
     private static func post(url: URL, body: [String: Any], apiKey: String, timeout: TimeInterval = 60) async throws -> Data {
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = timeout
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            let message = String(data: data, encoding: .utf8) ?? ""
-            throw NetworkServiceError.httpStatus(http.statusCode, message)
+        var lastError: Error?
+        for attempt in 1...3 {
+            do {
+                var request = URLRequest(url: url)
+                request.httpMethod = "POST"
+                request.timeoutInterval = timeout
+                request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+                request.httpBody = try JSONSerialization.data(withJSONObject: body)
+                let (data, response) = try await URLSession.shared.data(for: request)
+                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                    // 5xx 是服务端/中转瞬时故障，可重试；4xx（鉴权、余额等）重试也没用
+                    if (500...599).contains(http.statusCode), attempt < 3 {
+                        print("⚠️ 视觉请求 HTTP \(http.statusCode)，第 \(attempt) 次，\(attempt) 秒后重试")
+                        try await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+                        continue
+                    }
+                    let message = String(data: data, encoding: .utf8) ?? ""
+                    throw NetworkServiceError.httpStatus(http.statusCode, message)
+                }
+                return data
+            } catch {
+                if isRetryableNetworkError(error), attempt < 3 {
+                    print("⚠️ 视觉请求网络错误 \(error)，第 \(attempt) 次，\(attempt) 秒后重试")
+                    lastError = error
+                    try await Task.sleep(nanoseconds: UInt64(attempt) * 1_000_000_000)
+                    continue
+                }
+                throw error
+            }
         }
-        return data
+        throw lastError ?? URLError(.unknown)
+    }
+
+    /// 是否为值得重试的瞬时网络错误（-1005 连接丢失、-1001 超时、-1009 断网等）。
+    /// 注意：.cancelled、.badURL、鉴权失败等不在此列，重试也没用。
+    private static func isRetryableNetworkError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost,
+             .networkConnectionLost, .dnsLookupFailed,
+             .notConnectedToInternet, .secureConnectionFailed:
+            return true
+        default:
+            return false
+        }
     }
 
     /// 拉取可用模型列表：GET <base>/models，返回 data[].id（已排序）
