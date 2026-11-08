@@ -97,6 +97,8 @@ class ChatViewModel: ObservableObject {
     }()
     private var historySaveTask: Task<Void, Never>?
     private var activationPollingTask: Task<Void, Never>?
+    /// 用户主动断开后不再自动重连（回前台也不重连，直到用户再次操作）
+    private var userDisconnected = false
     
     // MCP Pending States (等待拍照)
     private var pendingMcpRequestId: Int?
@@ -161,6 +163,30 @@ class ChatViewModel: ObservableObject {
             }
         }
         
+        // 回前台自动重连：App 切后台被系统挂起杀掉 socket 后，回到前台立即重连
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handleWillEnterForeground),
+            name: UIApplication.willEnterForegroundNotification,
+            object: nil
+        )
+    }
+
+    @objc private func handleWillEnterForeground() {
+        Task { @MainActor in self.handleForegroundReturn() }
+    }
+
+    /// 回前台：若之前有会话但 socket 断了，立即重连；聊天记录在本地，不丢上下文。
+    /// 用户主动断开（disconnect()）后不自动重连；等待激活状态下也不重连。
+    @MainActor
+    func handleForegroundReturn() {
+        guard !userDisconnected, appState != .awaitingActivation else { return }
+        guard !webSocketManager.isConnected else { return }
+        if currentSessionId != nil {
+            webSocketManager.reconnectNow()
+        } else {
+            Task { await connect() }
+        }
     }
     
     private func loadHistory() {
@@ -229,6 +255,7 @@ class ChatViewModel: ObservableObject {
     
     @MainActor
     func connect() async {
+        userDisconnected = false
         if activationPollingTask != nil && appState == .awaitingActivation {
              return
         }
@@ -295,6 +322,7 @@ class ChatViewModel: ObservableObject {
     func disconnect() {
         // 1. 调用 WebSocketManager 的断开 (这里 webSocketManager 是 ViewModel 的属性)
         webSocketManager.disconnect(reason: "User Exit")
+        userDisconnected = true
         
         // 2. 只有 ViewModel 才有权限控制 audioService 和 appState
         audioService.stopRecording()
@@ -464,6 +492,13 @@ class ChatViewModel: ObservableObject {
         let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
 
+        // 本地导航意图：说“去XX/导航到XX”直接打开高德导航，不发给服务器
+        if let dest = Self.extractNavigationDestination(from: content) {
+            messageList.append(ChatMessage(text: content, type: .sent))
+            navigateTo(destination: dest)
+            return
+        }
+
         guard currentSessionId != nil, webSocketManager.isConnected else {
             appState = .connecting
             Task { await connect() }
@@ -506,6 +541,91 @@ class ChatViewModel: ObservableObject {
             }
             let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             speakLocally(text: "生图失败：\(reason)")
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // MARK: - 本地导航意图（打开系统高德地图）
+    // ----------------------------------------------------------------
+
+    /// 从一句话里提取导航目的地。只认明确的导航说法，返回 nil 表示不是导航请求。
+    /// 旅游攻略类（攻略/行程/旅游/旅行）不归这里管，仍走原来的旅行规划。
+    static func extractNavigationDestination(from text: String) -> String? {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        // 旅游攻略优先走旅行规划，不抢
+        if value.contains("攻略") || value.contains("行程") || value.contains("旅游") || value.contains("旅行") {
+            return nil
+        }
+        // 长触发词优先，避免“导航”被先吃掉导致“导航到”剩不下地名
+        let triggers = ["帮我导航到", "导航到", "带我去", "我要去", "我想去", "开车去", "怎么去", "导航去", "导航"]
+        var destination: String?
+        for trigger in triggers {
+            if let range = value.range(of: trigger) {
+                let rest = String(value[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rest.isEmpty {
+                    destination = rest
+                }
+                break
+            }
+        }
+        if destination == nil, value.hasPrefix("去"), value.count >= 3 {
+            destination = String(value.dropFirst()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard var dest = destination, !dest.isEmpty else { return nil }
+        // 去掉末尾的语气词/后缀
+        for suffix in ["怎么走", "的路线", "路线", "导航", "一下"] {
+            if dest.hasSuffix(suffix) {
+                dest = String(dest.dropLast(suffix.count))
+            }
+        }
+        dest = dest.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "，。！？、,.!? "))
+        guard !dest.isEmpty, dest != "哪里", dest != "哪儿", dest != "那" else { return nil }
+        return dest
+    }
+
+    /// 打开系统高德地图导航到指定目的地。
+    /// 先试后端地理编码拿坐标（3 秒超时，失败就直接用名字导航，高德自己会解析地名，
+    /// 所以不依赖后端也能用）；没装高德时明确语音+文字提示，不静默失败。
+    @MainActor
+    func navigateTo(destination: String) {
+        let dest = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !dest.isEmpty else { return }
+        messageList.append(ChatMessage(text: "正在为你导航到\(dest)…", type: .received))
+        Task {
+            var poi: AmapPOI?
+            do {
+                poi = try await withThrowingTaskGroup(of: AmapPOI?.self) { group in
+                    group.addTask {
+                        try await MapService.searchPOI(keywords: dest, city: LocationManager.shared.currentCity).1.first
+                    }
+                    group.addTask {
+                        try await Task.sleep(nanoseconds: 3_000_000_000)
+                        return nil
+                    }
+                    let first = try await group.next() ?? nil
+                    group.cancelAll()
+                    return first
+                }
+            } catch {
+                poi = nil
+            }
+            await MainActor.run {
+                if let poi = poi {
+                    if AmapNavigationService.openNavigation(poi: poi) {
+                        self.speakLocally(text: "正在打开高德地图，导航到\(dest)。")
+                    } else {
+                        self.speakLocally(text: "没有安装高德地图，请先安装高德地图再导航。")
+                    }
+                } else {
+                    if AmapNavigationService.openNavigationToName(dest) {
+                        self.speakLocally(text: "正在打开高德地图，导航到\(dest)。")
+                    } else {
+                        self.speakLocally(text: "没有安装高德地图，请先安装高德地图再导航。")
+                    }
+                }
+            }
         }
     }
 
@@ -923,6 +1043,11 @@ extension ChatViewModel: WebSocketManagerDelegate {
                     DispatchQueue.main.async {
                         SystemMusicViewModel.shared.togglePlayPause() // 暂停
                     }
+                }
+                
+                // 本地导航意图：语音说“去XX/导航到XX”直接打开高德导航（不依赖服务器 MCP）
+                if let dest = Self.extractNavigationDestination(from: text) {
+                    Task { @MainActor in self.navigateTo(destination: dest) }
                 }
                 
                 // 更新气泡
