@@ -729,7 +729,10 @@ class ChatViewModel: ObservableObject {
     }
 
     /// 打开系统高德地图打车到指定目的地。
-    /// 先试后端地理编码拿坐标（3 秒超时，失败就直接用名字打车，高德自己会解析地名）；
+    /// 坐标获取顺序（本机优先，不依赖连不上的本地后端）：
+    /// ① 本机 CLGeocoder 地理编码（WGS-84 -> GCJ-02 转换，快，通常 1 秒内）；
+    /// ② 后端 POI 搜索（127.0.0.1:8005，真机上连不上，3 秒超时兜底）；
+    /// ③ 只带名字的链接（高德 takeTaxi 不认纯 dname，大概率只打开通用打车页）。
     /// 没装高德时明确语音+文字提示，不静默失败。
     @MainActor
     func navigateToTaxi(destination: String) {
@@ -737,6 +740,18 @@ class ChatViewModel: ObservableObject {
         guard !dest.isEmpty else { return }
         messageList.append(ChatMessage(text: "正在为你叫车去\(dest)…", type: .received))
         Task {
+            // ① 本机地理编码拿坐标
+            if let coord = await LocalGeocoder.geocode(dest) {
+                await MainActor.run {
+                    if AmapNavigationService.openTaxiToCoordinate(name: dest, latitude: coord.latitude, longitude: coord.longitude) {
+                        self.speakLocally(text: "正在打开高德地图，叫车去\(dest)。")
+                    } else {
+                        self.speakLocally(text: "没有安装高德地图，请先安装高德地图再打车。")
+                    }
+                }
+                return
+            }
+            // ② 后端 POI 搜索（3 秒超时）
             var poi: AmapPOI?
             do {
                 poi = try await withThrowingTaskGroup(of: AmapPOI?.self) { group in
@@ -762,6 +777,7 @@ class ChatViewModel: ObservableObject {
                         self.speakLocally(text: "没有安装高德地图，请先安装高德地图再打车。")
                     }
                 } else {
+                    // ③ 只带名字回退（takeTaxi 可能不认纯 dname，只打开通用打车页）
                     if AmapNavigationService.openTaxiToName(dest) {
                         self.speakLocally(text: "正在打开高德地图，叫车去\(dest)。")
                     } else {
