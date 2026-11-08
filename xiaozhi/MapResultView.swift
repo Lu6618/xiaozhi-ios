@@ -42,9 +42,8 @@ struct MapResultView: View {
                             }
                             
                             Button(action: {
-                                // 跳转 Apple Maps 导航
-                                let url = URL(string: "http://maps.apple.com/?daddr=\(route.destName.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")")!
-                                UIApplication.shared.open(url)
+                                // 优先高德地图导航（按名字规划路线），未装高德时回退 Apple Maps
+                                AmapNavigationService.openRouteToName(route.destName)
                             }) {
                                 Text("开始导航")
                                     .bold()
@@ -73,8 +72,8 @@ struct MapResultView: View {
                                     }
                                     Spacer()
                                     Button(action: {
-                                        let url = URL(string: "http://maps.apple.com/?q=\(poi.name.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? "")")!
-                                        UIApplication.shared.open(url)
+                                        // 优先高德地图导航（有坐标直接开始导航），未装高德时回退 Apple Maps
+                                        AmapNavigationService.openPOINavigation(poi: poi)
                                     }) {
                                         Image(systemName: "car.fill")
                                             .padding()
