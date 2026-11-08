@@ -242,7 +242,10 @@ struct ConversationView: View {
         .id(settings.currentModel.dir)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .live2DInteraction(controller: live2DController) { isComposerFocused = false }
+        .live2DInteraction(controller: live2DController) {
+            isComposerFocused = false
+            composerStore.resignKeyboard()
+        }
     }
 
     private var voiceStage: some View {
@@ -471,6 +474,7 @@ struct ConversationView: View {
 
     private func enterPushToTalkMode() {
         isComposerFocused = false
+        composerStore.resignKeyboard()
         mode = .pushToTalk
     }
 
@@ -479,6 +483,10 @@ struct ConversationView: View {
         mode = .text
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
             isComposerFocused = true
+            // Direct UIKit focus (updateUIView no longer drives focus — build 99
+            // lesson: driving it from round-tripped SwiftUI state resigned a
+            // live field and the keyboard dismissed itself while typing).
+            self.composerStore.focusKeyboard()
         }
     }
 
