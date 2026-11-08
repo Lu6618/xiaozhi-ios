@@ -245,6 +245,40 @@ class VisionService {
         return try extractText(from: data, type: type)
     }
 
+    /// 通用纯文本补全：用当前视觉配置（地址/Key/类型/模型）问模型一个问题，返回模型的纯文本回复
+    /// 供生图意图识别等不需要发图的场景使用
+    static func completeText(system: String, user: String, maxTokens: Int = 200) async throws -> String {
+        let apiKey = AppConfig.visionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !apiKey.isEmpty else { throw NetworkServiceError.missingZhipuAPIKey }
+        guard let url = URL(string: AppConfig.visionEndpoint) else { throw URLError(.badURL) }
+
+        let type = AppConfig.visionAPIType
+        let body: [String: Any]
+        switch type {
+        case .chat:
+            body = [
+                "model": AppConfig.visionModel,
+                "stream": false,
+                "max_tokens": maxTokens,
+                "messages": [
+                    ["role": "system", "content": system],
+                    ["role": "user", "content": user]
+                ]
+            ]
+        case .responses:
+            body = [
+                "model": AppConfig.visionModel,
+                "max_output_tokens": maxTokens,
+                "input": [
+                    ["role": "system", "content": [["type": "input_text", "text": system]]],
+                    ["role": "user", "content": [["type": "input_text", "text": user]]]
+                ]
+            ]
+        }
+        let data = try await post(url: url, body: body, apiKey: apiKey, timeout: 60)
+        return try extractText(from: data, type: type)
+    }
+
     static func analyze(base64: String) async throws -> String {
         let apiKey = AppConfig.visionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !apiKey.isEmpty else { throw NetworkServiceError.missingZhipuAPIKey }
