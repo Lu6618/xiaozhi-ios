@@ -1,9 +1,12 @@
-// 文件: XiaozhiIntents.swift (build 128 - Siri 后台通话入口)
+// 文件: XiaozhiIntents.swift (build 128 - Siri 后台通话入口；build 138 等 perform 才返回)
 //
 // “嘿 Siri，给小智打电话”：App Intent 在后台跑（openAppWhenRun = false），
 // 不打开 App；通话由 CallKit 接管（系统通话界面 + 后台音频）。
 // 注意：App Shortcuts 在 App 安装并打开过一次后才会注册到 Siri，
 // 所以装好新版后要先打开一次 App，再说“嘿 Siri，给小智打电话”。
+// build 138：intent 等 perform 真正到达（通话界面出现）才返回；
+// 只等 request completion 就返回会导致 App 被挂起、perform 送不到
+// （build 137 实测：快捷指令打勾完成，但始终没通话界面）。
 
 import AppIntents
 
@@ -21,8 +24,9 @@ struct StartXiaozhiCallIntent: AppIntent {
         await MainActor.run {
             _ = ChatViewModel.shared
         }
-        // 等 CallKit 接管（系统接受去电请求）再返回，避免 intent 一结束系统就挂起 App。
-        await ChatViewModel.shared.startCallKitCall()
+        // 等 perform 真正到达（系统通话界面出现）才返回；失败时抛中文原因，
+        // 快捷指令会显示出来，不要静默。App 靠 CallKit 通话 + 音频后台模式活着。
+        try await ChatViewModel.shared.startCallKitCall()
         return .result()
     }
 }

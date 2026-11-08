@@ -408,6 +408,8 @@ class ChatViewModel: ObservableObject {
     private var pendingCallKitCall = false
     /// CallKit 通话中断线看门狗：socket 断了 20 秒还没恢复就挂断系统通话，避免界面卡死。
     private var callKitFailureWatchdog: Task<Void, Never>?
+    /// 正在发起 CallKit 通话（防两次 intent 并发进 startCallKitCall）。
+    private var isStartingCallKitCall = false
 
     /// 一键通话入口（deep link 用）：标记待进通话，并通知 View 切界面。
     @MainActor
@@ -469,15 +471,44 @@ class ChatViewModel: ObservableObject {
     // ----------------------------------------------------------------
 
     /// Siri 入口：开始 CallKit 通话（后台跑，不打开 App）。
-    /// 等系统接受去电请求才返回，intent 随后结束，App 靠 CallKit 通话 + 音频后台模式活着。
+    /// 等系统真正递送 perform（通话界面出现）才返回——只等 request completion
+    /// 就返回会导致 intent 结束、App 被挂起，perform 永远送不到、界面不出现
+    /// （build 137 实测：快捷指令显示打勾完成，但始终没通话界面）。
+    /// 失败（被拒/超时/通话中）时抛中文错，快捷指令会显示失败原因。
     @MainActor
-    func startCallKitCall() async {
-        guard !CallKitManager.shared.isCallActive else { return }
+    func startCallKitCall() async throws {
+        guard !isStartingCallKitCall else {
+            throw XiaozhiCallError(message: "正在发起通话，请稍候")
+        }
+        isStartingCallKitCall = true
+        defer { isStartingCallKitCall = false }
+        // 残留的僵尸通话：管理器里还有 UUID，但 ViewModel 并不在通话中
+        // （上次去电没等到 perform，或挂断的 perform 没回来）→ 先清掉再发起，
+        // 否则 guard 直接 return、什么都不发生。
+        if CallKitManager.shared.isCallActive, !isCallKitCall {
+            print("⚠️ CallKit stale call found (manager has UUID, ViewModel not in call), resetting")
+            CallKitManager.shared.resetStaleCall()
+            pendingCallKitCall = false
+            callKitCallActive = false
+            callKitFailureWatchdog?.cancel()
+            callKitFailureWatchdog = nil
+            audioService.endCallKitAudio()
+        }
+        guard !CallKitManager.shared.isCallActive else {
+            throw XiaozhiCallError(message: "小智正在通话中")
+        }
         CallKitManager.shared.delegate = self
         isCallKitCall = true
         pendingCallKitCall = false
         audioService.callKitCallActive = true
-        await CallKitManager.shared.startOutgoingCall()
+        switch await CallKitManager.shared.startOutgoingCall() {
+        case .performed:
+            return
+        case .rejected(let message):
+            throw XiaozhiCallError(message: "发起通话失败：\(message ?? "系统拒绝了请求")，请重试")
+        case .timedOut:
+            throw XiaozhiCallError(message: "发起通话超时，系统没有响应，请重试")
+        }
     }
 
     /// 结束 CallKit 通话（系统界面挂断 / 通话失败时调）。
