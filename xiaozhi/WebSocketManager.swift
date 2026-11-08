@@ -33,6 +33,7 @@ class WebSocketManager : NSObject {
     private var reconnectAttempts = 0
     private var isManuallyClosed = false // 标记是否是用户主动断开
     private var reconnectScheduled = false // 防止同一断线重复排期重连
+    private var connectionGeneration = 0 // 连接代际：旧任务的回调（取消/关闭/收消息）不得干扰新连接
     
     override private init() {
         super.init()
@@ -47,6 +48,11 @@ class WebSocketManager : NSObject {
             webSocketTask?.cancel()
             webSocketTask = nil
         }
+
+        // 代际 +1：旧任务随后到达的取消/关闭/收消息回调一律丢弃，
+        // 否则它们会误判新连接已断（回前台重连刚成功就被旧回调打回“连接失败”）。
+        connectionGeneration += 1
+        let generation = connectionGeneration
         
         print("Attempting to connect to WebSocket...")
         
@@ -72,7 +78,7 @@ class WebSocketManager : NSObject {
         self.webSocketTask?.resume()
         
         // 开始监听
-        listenForMessages()
+        listenForMessages(generation: generation)
     }
     
     // MARK: - Disconnect
@@ -92,9 +98,12 @@ class WebSocketManager : NSObject {
     }
     
     // MARK: - Listen
-    private func listenForMessages() {
+    private func listenForMessages(generation: Int) {
         webSocketTask?.receive { [weak self] result in
             guard let self = self else { return }
+
+            // 旧连接的回调直接丢弃（新连接已建立，旧任务的取消报错不得干扰它）
+            guard generation == self.connectionGeneration else { return }
             
             // ✅ 如果用户已经手动断开，或者是旧的 Task 回调，直接忽略
             if self.isManuallyClosed || self.webSocketTask == nil {
@@ -114,7 +123,7 @@ class WebSocketManager : NSObject {
                     break
                 }
                 // 继续监听下一条
-                self.listenForMessages()
+                self.listenForMessages(generation: generation)
                 
             case .failure(let error):
                 // ✅ 只有非手动关闭导致的错误，才算异常
@@ -181,7 +190,8 @@ class WebSocketManager : NSObject {
     private func scheduleReconnect() {
         reconnectScheduled = true
         reconnectAttempts += 1
-        let delay = min(pow(2.0, Double(reconnectAttempts)), 30.0)
+        // 指数退避，上限 10 秒（旧版 30 秒太长，回前台重连失败后等得太久）
+        let delay = min(pow(2.0, Double(reconnectAttempts)), 10.0)
         print("Scheduling reconnect attempt \(reconnectAttempts) in \(delay) seconds.")
         
         DispatchQueue.global().asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -260,6 +270,8 @@ class WebSocketManager : NSObject {
 // MARK: - URLSession Delegate
 extension WebSocketManager: URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
+        // 旧任务的打开回调不得干扰新连接
+        guard webSocketTask === self.webSocketTask else { return }
         print("WebSocket TCP connection established.")
         DispatchQueue.main.async {
             self.isConnected = true
@@ -272,6 +284,8 @@ extension WebSocketManager: URLSessionWebSocketDelegate {
     }
     
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        // 旧任务的关闭回调不得干扰新连接
+        guard webSocketTask === self.webSocketTask else { return }
         // 如果是我们自己手动关的，就不处理了
         if isManuallyClosed { return }
         
