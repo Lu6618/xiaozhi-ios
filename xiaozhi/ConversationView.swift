@@ -631,6 +631,7 @@ private struct ServiceSettingsSheet: View {
     @AppStorage(AppConfig.visionAPIBaseURLKey) private var baseURL = ""
     @AppStorage(AppConfig.visionAPITypeKey) private var apiTypeRaw = VisionAPIType.chat.rawValue
     @AppStorage(AppConfig.visionModelKey) private var visionModel = "glm-4v-flash"
+    @AppStorage(AppConfig.visionPromptTemplateKey) private var promptTemplate = AppConfig.defaultVisionPromptTemplate
     @Environment(\.dismiss) private var dismiss
     @State private var apiKey = AppConfig.visionAPIKey
     @State private var showKey = false
@@ -840,6 +841,23 @@ private struct ServiceSettingsSheet: View {
                     Text("拉不到列表时也可以手动输入模型名。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("识别后告诉小智的话")
+                        .font(.headline)
+                    TextEditor(text: $promptTemplate)
+                        .frame(minHeight: 84)
+                        .padding(8)
+                        .background(Color(uiColor: .systemGray6))
+                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    Text("发给小智的提示词模板，{description} 会被换成图片识别结果；模板里没有 {description} 时，识别结果会拼在末尾。这句话不会显示在聊天里，看起来就是小智直接看到了照片。")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Button("恢复默认") {
+                        promptTemplate = AppConfig.defaultVisionPromptTemplate
+                    }
+                    .font(.caption)
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
