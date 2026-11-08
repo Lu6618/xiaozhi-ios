@@ -82,6 +82,16 @@ struct ComposerTextField: UIViewRepresentable {
         return field
     }
 
+    /// Pin the height. A bare UIViewRepresentable UITextField has no usable
+    /// intrinsic height for SwiftUI's layout, so without this SwiftUI offers
+    /// it the full available height and it stretches to fill it — in build 96
+    /// the composer became a full-screen rounded rectangle that covered the
+    /// chat transcript (the "blank screen" in Lu's 16:26 screenshot). A
+    /// single-line 17pt field is 36pt tall (matches the 36pt "+" button).
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UITextField, context: Context) -> CGSize? {
+        CGSize(width: proposal.width ?? 0, height: 36)
+    }
+
     func updateUIView(_ uiView: UITextField, context: Context) {
         // Keep the Coordinator's submit closure fresh (ConversationView is a
         // struct; the closure captured at makeCoordinator time may go stale).
