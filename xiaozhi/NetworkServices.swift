@@ -257,32 +257,35 @@ class MapService {
     
     // 2. 新增：周边搜索
     static func aroundSearch(keywords: String, radius: Int = 3000) async throws -> (String, [AmapPOI]) {
-        guard let loc = LocationManager.shared.currentLocation else {
-            return ("无法获取当前位置，无法进行周边搜索。", [])
+        // 先等定位（最多 6 秒）：旧版直接读 currentLocation，单例没被访问过时是 nil，
+        // 直接返回“无法获取当前位置”，小智只能反问用户在哪
+        let loc: CLLocationCoordinate2D
+        do {
+            loc = try await LocationManager.shared.awaitCurrentLocation(timeout: 6.0)
+        } catch {
+            return ("无法获取当前位置，请检查定位权限后重试。", [])
         }
         
         let locationStr = String(format: "%.6f,%.6f", loc.longitude, loc.latitude)
         
+        // 走 MCP Worker 的高德工具：本机 http://127.0.0.1 后端在真机上不可达（build 105 已确认），
+        // 高德 Key 只在 Worker 的 secret 里，App 不直接调 restapi.amap.com
         let data = try await NetworkService.postRequest(
-            url: "\(AppConfig.BaseURLs.amap)/maps/around_search",
+            url: "https://mcp.698668.xyz/tool-call",
             body: [
-                "keywords": keywords,
-                "location": locationStr,
-                "radius": radius
+                "name": "amap_poi_search",
+                "arguments": [
+                    "keywords": keywords,
+                    "location": locationStr,
+                    "radius": radius
+                ]
             ]
         )
         
+        // Worker 返回 {"result": "精简中文…"}；POI 结构化数据不在返回里，语音播报只用文本
         if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
            let result = json["result"] as? String {
-            
-            var pois: [AmapPOI] = []
-            if let poisData = json["data"] {
-                let bytes = try? JSONSerialization.data(withJSONObject: poisData)
-                if let decoded = try? JSONDecoder().decode([AmapPOI].self, from: bytes ?? Data()) {
-                    pois = decoded
-                }
-            }
-            return (result, pois)
+            return (result, [])
         }
         throw URLError(.cannotParseResponse)
     }

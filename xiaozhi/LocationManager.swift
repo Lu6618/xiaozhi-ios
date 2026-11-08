@@ -11,6 +11,10 @@ import CoreLocation
 import Combine
 
 
+enum LocationError: Error {
+    case timeout
+}
+
 class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
     
     static let shared = LocationManager()
@@ -36,8 +40,8 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
         locationManager.requestLocation()
     }
     
-    // ✅ 核心修复：异步等待位置
-    func awaitCurrentLocation(timeout: TimeInterval = 5.0) async throws -> CLLocationCoordinate2D {
+    // ✅ 核心修复：异步等待位置（带真实超时；旧版 timeout 参数传进来根本没用上，拿不到位置会一直挂起）
+    func awaitCurrentLocation(timeout: TimeInterval = 6.0) async throws -> CLLocationCoordinate2D {
         // 1. 如果已有位置，直接返回
         if let loc = currentLocation {
             return loc
@@ -48,7 +52,20 @@ class LocationManager: NSObject, ObservableObject, CLLocationManagerDelegate {
         // 2. 触发系统定位
         locationManager.requestLocation()
         
-        // 3. 挂起等待
+        // 3. 超时保护：timeout 秒后还没拿到位置，让等待的任务抛超时错误
+        // （与 delegate 回调都在主队列串行，不会重复唤醒同一个 continuation）
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            guard let self else { return }
+            DispatchQueue.main.async {
+                if !self.pendingContinuations.isEmpty {
+                    self.pendingContinuations.forEach { $0.resume(throwing: LocationError.timeout) }
+                    self.pendingContinuations.removeAll()
+                }
+            }
+        }
+        
+        // 4. 挂起等待
         // 我们利用 withCheckedThrowingContinuation 来挂起当前任务
         return try await withCheckedThrowingContinuation { continuation in
             // 将 continuation 加入队列，等待 Delegate 回调唤醒

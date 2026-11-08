@@ -145,6 +145,12 @@ class ChatViewModel: ObservableObject {
         webSocketManager.delegate = self
         DouyinManager.shared.delegate = self
         
+        // 定位预热：App 启动就开始定位，用户问“附近”时 currentLocation 已有值。
+        // LocationManager 单例此前只在打车/导航/MCP 工具里才被首次访问，get_user_location
+        // 第一次调用时现取位置会等几秒甚至直接报 GPS unavailable，小智只能反问用户在哪。
+        _ = LocationManager.shared
+        LocationManager.shared.requestLocation()
+        
         if self.isSystemSpeaking {
             return
         }

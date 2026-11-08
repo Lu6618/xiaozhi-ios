@@ -80,19 +80,6 @@ class MCPManager {
             ]
         ],
         [
-            "name": "maps_direction",
-            "description": "Plan a driving route between two places.",
-            "inputSchema": [
-                "type": "object",
-                "properties": [
-                    "origin": ["type": "string", "description": "Start place (use 'current_location' for user position)"],
-                    "destination": ["type": "string", "description": "End place"],
-                    "city": ["type": "string", "description": "City name"]
-                ],
-                "required": ["origin", "destination"]
-            ]
-        ],
-        [
             "name": "maps_weather",
             "description": "Query weather forecast for a city.",
             "inputSchema": [
@@ -117,7 +104,7 @@ class MCPManager {
         ],
         [
             "name": "get_user_location",
-            "description": "Get user's current GPS location.",
+            "description": "Get user's current GPS location (coordinates and address). Call this FIRST when the user asks about nearby places ('附近', '周边', 'around me') without naming a place, then use the returned coordinates with a map search tool.",
             "inputSchema": ["type": "object", "properties": [:]]
         ],
         // 1. ✅ 综合路径规划 (驾车/公交/步行/骑行)
@@ -138,7 +125,7 @@ class MCPManager {
         // 2. ✅ 周边搜索 (附近)
         [
             "name": "maps_around_search",
-            "description": "Search for POIs (like gas station, kfc, hotel) around the user's current location.",
+            "description": "Search for POIs (like 火锅, 咖啡, 酒店) around the user's current location. Uses GPS automatically, no location needed — just pass keywords.",
             "inputSchema": [
                 "type": "object",
                 "properties": [
@@ -431,7 +418,10 @@ class MCPManager {
                 
             case "get_user_location":
                 print(">>> 📍 MCP: 获取位置")
-                if let loc = LocationManager.shared.currentLocation {
+                do {
+                    // 等定位（最多 6 秒）：旧版直接读 currentLocation，单例此前没被访问过时
+                    // 位置还是 nil，直接报 GPS unavailable，小智只能反问用户在哪
+                    let loc = try await LocationManager.shared.awaitCurrentLocation(timeout: 6.0)
                     let geocoder = CLGeocoder()
                     let clLoc = CLLocation(latitude: loc.latitude, longitude: loc.longitude)
                     
@@ -456,8 +446,8 @@ class MCPManager {
                     sendSuccess(id: id, sessionId: sessionId, text: info)
                     delegate?.mcpDidRequestSendFakeUserMessage(text: "定位成功：\(addressStr)。")
                     
-                } else {
-                    sendError(id: id, sessionId: sessionId, message: "GPS unavailable")
+                } catch {
+                    sendError(id: id, sessionId: sessionId, message: "无法获取当前位置，请检查定位权限后重试")
                 }
                 
             case "control_local_music":
