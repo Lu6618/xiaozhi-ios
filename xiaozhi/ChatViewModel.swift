@@ -45,6 +45,8 @@ class ChatViewModel: ObservableObject {
     @Published var activationMessage = ""
     @Published var isHandsFreeMode: Bool = false
     @Published var isMicrophoneMuted: Bool = false
+    /// 回前台正在重连（UI 显示“正在重连…”）；会话建立（hello 到达）或用户主动断开时清掉。
+    @Published var isReconnecting = false
     
     // Sheets & Popups
     @Published var activeSheet: ActiveSheet?
@@ -176,12 +178,17 @@ class ChatViewModel: ObservableObject {
         Task { @MainActor in self.handleForegroundReturn() }
     }
 
-    /// 回前台：若之前有会话但 socket 断了，立即重连；聊天记录在本地，不丢上下文。
+    /// 回前台：立刻自动重连，不等、不靠定时器轮询。
+    /// build 83 的问题：只在 isConnected == false 时才重连，但后台被系统挂起杀掉 socket 后，
+    /// close 事件根本没送达，isConnected 仍残留 true，于是直接 return、一次重连都不跑，
+    /// 用户看到的就是“直接断了”。现在有会话就强制重连（reconnectNow 会先取消旧任务），
+    /// UI 显示“正在重连…”。聊天记录在本地，不丢上下文。
     /// 用户主动断开（disconnect()）后不自动重连；等待激活状态下也不重连。
     @MainActor
     func handleForegroundReturn() {
         guard !userDisconnected, appState != .awaitingActivation else { return }
-        guard !webSocketManager.isConnected else { return }
+        isReconnecting = true
+        appState = .connecting
         if currentSessionId != nil {
             webSocketManager.reconnectNow()
         } else {
@@ -323,6 +330,8 @@ class ChatViewModel: ObservableObject {
         // 1. 调用 WebSocketManager 的断开 (这里 webSocketManager 是 ViewModel 的属性)
         webSocketManager.disconnect(reason: "User Exit")
         userDisconnected = true
+        isReconnecting = false
+        cancelPendingVoiceCall()
         
         // 2. 只有 ViewModel 才有权限控制 audioService 和 appState
         audioService.stopRecording()
@@ -335,6 +344,58 @@ class ChatViewModel: ObservableObject {
         pendingVoicePackets.removeAll()
         pendingVoiceDate = nil
         stopPollingForActivation()
+    }
+
+    // ----------------------------------------------------------------
+    // MARK: - Deep Link（一键通话）
+    // ----------------------------------------------------------------
+
+    /// View 监听到它变 true 就切到通话界面并进通话；View 消费后自己置回 false。
+    @Published var voiceCallRequested = false
+    /// 未连接时的一键通话请求：连上（hello 到达）后自动进通话，不用用户再点。
+    private var pendingVoiceCall = false
+    /// deep link 带的 text 参数：通话开始后直接发出去，用完即清。
+    private var pendingDeepLinkText: String?
+
+    /// 一键通话入口（deep link 用）：标记待进通话，并通知 View 切界面。
+    @MainActor
+    func requestVoiceCall() {
+        pendingVoiceCall = true
+        voiceCallRequested = true
+    }
+
+    /// 通话按钮在未连接时调用：只标记待进通话，不通知 View（View 已经在处理了）。
+    @MainActor
+    func notePendingVoiceCall() {
+        pendingVoiceCall = true
+    }
+
+    /// 用户离开通话界面 / 主动断开时取消待进通话，避免之后 hello 到达又自动拉起通话。
+    @MainActor
+    func cancelPendingVoiceCall() {
+        pendingVoiceCall = false
+        pendingDeepLinkText = nil
+    }
+
+    /// 处理外部 URL：
+    /// - xiaozhi://call —— 打开 App 后直接开始语音通话（免提，自动连接、自动进通话）
+    /// - xiaozhi://call?text=你好 —— 同上，通话开始后把这句话直接发给小智
+    /// - xiaozhi://chat —— 打开到聊天页（默认行为，什么都不做）
+    @MainActor
+    func handleDeepLink(url: URL) {
+        guard url.scheme?.lowercased() == "xiaozhi" else { return }
+        switch url.host?.lowercased() ?? "" {
+        case "call":
+            let text = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?.first(where: { $0.name == "text" })?.value?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if let text, !text.isEmpty { pendingDeepLinkText = text }
+            requestVoiceCall()
+        case "chat":
+            break
+        default:
+            break
+        }
     }
 
     @MainActor
@@ -492,6 +553,14 @@ class ChatViewModel: ObservableObject {
         let content = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
 
+        // 本地打车意图：说“打车去XX/叫车去XX”直接打开高德打车页，不发给服务器
+        // （打车比导航更具体，先判打车；“我要打车去XX”不含导航触发词，不会被导航抢走）
+        if let dest = Self.extractTaxiDestination(from: content) {
+            messageList.append(ChatMessage(text: content, type: .sent))
+            navigateToTaxi(destination: dest)
+            return
+        }
+
         // 本地导航意图：说“去XX/导航到XX”直接打开高德导航，不发给服务器
         if let dest = Self.extractNavigationDestination(from: content) {
             messageList.append(ChatMessage(text: content, type: .sent))
@@ -629,6 +698,100 @@ class ChatViewModel: ObservableObject {
         }
     }
 
+    /// 从一句话里提取打车目的地。只认明确的打车说法，返回 nil 表示不是打车请求。
+    /// “我要打车去XX”不含导航触发词，不会被导航抢走；旅游攻略类不归这里管。
+    static func extractTaxiDestination(from text: String) -> String? {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        if value.contains("攻略") || value.contains("行程") || value.contains("旅游") || value.contains("旅行") {
+            return nil
+        }
+        // 长触发词优先，避免“打车”先吃掉导致“打车去”剩不下地名
+        let triggers = ["打车去", "叫车去", "打车到", "叫车到", "打车", "叫车"]
+        var destination: String?
+        for trigger in triggers {
+            if let range = value.range(of: trigger) {
+                let rest = String(value[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !rest.isEmpty {
+                    destination = rest
+                }
+                break
+            }
+        }
+        guard var dest = destination, !dest.isEmpty else { return nil }
+        if dest.hasSuffix("一下") {
+            dest = String(dest.dropLast("一下".count))
+        }
+        dest = dest.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "，。！？、,.!? "))
+        guard !dest.isEmpty else { return nil }
+        return dest
+    }
+
+    /// 打开系统高德地图打车到指定目的地。
+    /// 先试后端地理编码拿坐标（3 秒超时，失败就直接用名字打车，高德自己会解析地名）；
+    /// 没装高德时明确语音+文字提示，不静默失败。
+    @MainActor
+    func navigateToTaxi(destination: String) {
+        let dest = destination.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !dest.isEmpty else { return }
+        messageList.append(ChatMessage(text: "正在为你叫车去\(dest)…", type: .received))
+        Task {
+            var poi: AmapPOI?
+            do {
+                poi = try await withThrowingTaskGroup(of: AmapPOI?.self) { group in
+                    group.addTask {
+                        try await MapService.searchPOI(keywords: dest, city: LocationManager.shared.currentCity).1.first
+                    }
+                    group.addTask {
+                        try await Task.sleep(nanoseconds: 3_000_000_000)
+                        return nil
+                    }
+                    let first = try await group.next() ?? nil
+                    group.cancelAll()
+                    return first
+                }
+            } catch {
+                poi = nil
+            }
+            await MainActor.run {
+                if let poi = poi {
+                    if AmapNavigationService.openTaxi(poi: poi) {
+                        self.speakLocally(text: "正在打开高德地图，叫车去\(dest)。")
+                    } else {
+                        self.speakLocally(text: "没有安装高德地图，请先安装高德地图再打车。")
+                    }
+                } else {
+                    if AmapNavigationService.openTaxiToName(dest) {
+                        self.speakLocally(text: "正在打开高德地图，叫车去\(dest)。")
+                    } else {
+                        self.speakLocally(text: "没有安装高德地图，请先安装高德地图再打车。")
+                    }
+                }
+            }
+        }
+    }
+
+    /// 服务器回复里若含高德链接（amapuri:// / iosamap://，如地图工具回的打车/导航链接），
+    /// 直接打开高德 App，不要只当文本显示。只认这两个 scheme；同一条链接只打开一次。
+    private var lastOpenedAmapLink: String?
+
+    private func openAmapLinkIfPresent(in text: String) {
+        guard let urlString = Self.firstAmapURLString(in: text),
+              urlString != lastOpenedAmapLink else { return }
+        guard let url = URL(string: urlString) ?? URLComponents(string: urlString)?.url else { return }
+        lastOpenedAmapLink = urlString
+        UIApplication.shared.open(url)
+    }
+
+    private static func firstAmapURLString(in text: String) -> String? {
+        let pattern = "(amapuri|iosamap)://[^\\s\"'<>]+"
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range, in: text) else { return nil }
+        return String(text[range])
+    }
+
     @MainActor
     func setMicrophoneMuted(_ muted: Bool) {
         isMicrophoneMuted = muted
@@ -645,6 +808,11 @@ class ChatViewModel: ObservableObject {
         isMicrophoneMuted = false
         setMode(handsFree: true)
         startAutoListening()
+        // deep link 带的一句话（xiaozhi://call?text=...）：通话开始后直接发给小智
+        if let text = pendingDeepLinkText, !text.isEmpty {
+            pendingDeepLinkText = nil
+            injectVoiceCommand(text: text, showBubble: true)
+        }
     }
 
     @MainActor
@@ -916,6 +1084,13 @@ extension ChatViewModel: WebSocketManagerDelegate {
         DispatchQueue.main.async {
             print(">>> ✅ [WS] Session Established: \(sessionId)")
             self.currentSessionId = sessionId
+            // 会话建立：重连成功，清除“正在重连…”显示
+            self.isReconnecting = false
+            // 一键通话：冷启动/未连接时点的通话，连上后自动进通话
+            if self.pendingVoiceCall {
+                self.pendingVoiceCall = false
+                self.voiceCallRequested = true
+            }
             
             // 强制重置音频状态，防止引擎卡死
             self.audioService.stopRecording()
@@ -1045,6 +1220,11 @@ extension ChatViewModel: WebSocketManagerDelegate {
                     }
                 }
                 
+                // 本地打车意图：语音说“打车去XX/叫车去XX”直接打开高德打车页（打车比导航更具体，先判）
+                if let dest = Self.extractTaxiDestination(from: text) {
+                    Task { @MainActor in self.navigateToTaxi(destination: dest) }
+                }
+
                 // 本地导航意图：语音说“去XX/导航到XX”直接打开高德导航（不依赖服务器 MCP）
                 if let dest = Self.extractNavigationDestination(from: text) {
                     Task { @MainActor in self.navigateTo(destination: dest) }
@@ -1101,6 +1281,11 @@ extension ChatViewModel: WebSocketManagerDelegate {
                     if isHandsFreeMode { pauseAutoListeningForAI() }
                 } else if state == "stop" {
                     self.audioService.stopPlaying()
+
+                    // 服务器回的高德链接（如打车/导航链接）直接打开高德 App，不要只当文本显示
+                    if let last = self.messageList.last, last.type == .received {
+                        self.openAmapLinkIfPresent(in: last.text)
+                    }
                     
                     // 强制显示未闭合的 HTML
                     if let html = self.pendingHtmlBuffer {
