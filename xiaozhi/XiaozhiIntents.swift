@@ -28,11 +28,12 @@ struct StartXiaozhiCallIntent: AppIntent {
 }
 
 /// Siri 短语注册：嘿 Siri，给小智打电话 / 和小智打电话 / 呼叫小智。
+/// 注意：每条短语必须恰好含一次 ${applicationName}（编译期校验），运行时替换为 App 名“小智”。
 struct XiaozhiShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
         AppShortcut(
             intent: StartXiaozhiCallIntent(),
-            phrases: ["给小智打电话", "和小智打电话", "呼叫小智"],
+            phrases: ["给${applicationName}打电话", "和${applicationName}打电话", "呼叫${applicationName}"],
             shortTitle: "给小智打电话",
             systemImageName: "phone"
         )
