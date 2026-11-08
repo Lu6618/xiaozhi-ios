@@ -541,6 +541,7 @@ struct ConversationView: View {
 private struct ConversationMessageRow: View {
     let message: ChatMessage
     let onRecognizeText: (UIImage) -> Void
+    @State private var preview: PreviewImage?
 
     var body: some View {
         HStack {
@@ -553,6 +554,8 @@ private struct ConversationMessageRow: View {
                         .scaledToFit()
                         .frame(maxWidth: 190, maxHeight: 160)
                         .clipShape(RoundedRectangle(cornerRadius: 14))
+                        .contentShape(Rectangle())
+                        .onTapGesture { preview = PreviewImage(image: image) }
                         .contextMenu {
                             Button { onRecognizeText(image) } label: {
                                 Label("识别并复制文字", systemImage: "text.viewfinder")
@@ -581,6 +584,86 @@ private struct ConversationMessageRow: View {
             }
 
             if message.type == .received { Spacer(minLength: 52) }
+        }
+        .fullScreenCover(item: $preview) { item in
+            ImagePreviewView(image: item.image)
+        }
+    }
+}
+
+/// 全屏图片查看用的 Identifiable 包装（UIImage 本身不符合 Identifiable）
+private struct PreviewImage: Identifiable {
+    let id = UUID()
+    let image: UIImage
+}
+
+/// 点聊天图片后全屏查看：双指捏合缩放 / 双击切换 1x/2x / 拖动平移，
+/// 点空白处或右上角 ✕ 关闭
+private struct ImagePreviewView: View {
+    let image: UIImage
+    @Environment(\.dismiss) private var dismiss
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+                .onTapGesture { dismiss() }
+
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .scaleEffect(scale)
+                .offset(offset)
+                .gesture(
+                    MagnificationGesture()
+                        .onChanged { value in
+                            scale = max(1, min(4, lastScale * value))
+                        }
+                        .onEnded { _ in lastScale = scale }
+                )
+                .simultaneousGesture(
+                    DragGesture()
+                        .onChanged { value in
+                            guard scale > 1 else { return }
+                            offset = CGSize(
+                                width: lastOffset.width + value.translation.width,
+                                height: lastOffset.height + value.translation.height
+                            )
+                        }
+                        .onEnded { _ in lastOffset = offset }
+                )
+                .onTapGesture(count: 2) {
+                    withAnimation {
+                        if scale > 1.5 {
+                            scale = 1
+                            offset = .zero
+                        } else {
+                            scale = 2
+                        }
+                        lastScale = scale
+                        lastOffset = offset
+                    }
+                }
+
+            VStack {
+                HStack {
+                    Spacer()
+                    Button { dismiss() } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .font(.system(size: 30))
+                            .foregroundStyle(.white.opacity(0.85))
+                            .padding()
+                    }
+                }
+                Spacer()
+                Text("双击放大 · 双指缩放 · 点空白处关闭")
+                    .font(.footnote)
+                    .foregroundStyle(.white.opacity(0.7))
+                    .padding(.bottom, 28)
+            }
         }
     }
 }
