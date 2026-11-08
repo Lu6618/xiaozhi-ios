@@ -1,6 +1,7 @@
 import SwiftUI
 import PhotosUI
 import Combine
+import UIKit
 
 private enum ConversationUIMode {
     case text
@@ -123,6 +124,15 @@ struct ConversationView: View {
             if state == .connectionFailed || state == .awaitingActivation {
                 if mode == .voiceCall { mode = .pushToTalk }
             }
+        }
+        // Deep Link 一键通话：xiaozhi://call（View 消费标志后自己置回 false，再进通话）
+        .onChange(of: chatVM.voiceCallRequested) { requested in
+            guard requested else { return }
+            chatVM.voiceCallRequested = false
+            beginVoiceCall()
+        }
+        .onOpenURL { url in
+            chatVM.handleDeepLink(url: url)
         }
         .task {
             chatVM.setMode(handsFree: false)
@@ -395,6 +405,7 @@ struct ConversationView: View {
     }
 
     private var statusText: String {
+        if chatVM.isReconnecting { return "正在重连…" }
         switch chatVM.appState {
         case .idle: return "在线"
         case .listening: return "正在聆听"
@@ -416,10 +427,24 @@ struct ConversationView: View {
     }
 
     private func sendMessage() {
-        let content = messageText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 直接读底层 UITextField 的真实文本：中文输入时，未确认的拼音组词（marked text）
+        // 不会同步到 SwiftUI 的 messageText 绑定，读绑定会丢最后几个字；
+        // 打完字马上点发送丢字、停一会儿再发不丢，就是这个原因（不是防抖/节流，绑定上没有）。
+        let content = currentComposerText().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { return }
         chatVM.sendTextMessage(content)
         messageText = ""
+    }
+
+    /// 输入框当前真实文本（含中文输入法未确认的 marked text）。
+    /// 优先读第一响应 UITextField 的 text（包含 marked text 的已显示字符），
+    /// 拿不到时回退到 SwiftUI 绑定值。
+    private func currentComposerText() -> String {
+        if let field = UIResponder.currentFirstResponder as? UITextField,
+           let text = field.text, !text.isEmpty {
+            return text
+        }
+        return messageText
     }
 
     private func openCamera() {
@@ -446,6 +471,8 @@ struct ConversationView: View {
 
     private func beginVoiceCall() {
         guard chatVM.isConnected else {
+            // 未连接：先标记“连上后自动进通话”，再去连接；hello 到达后自动拉起，不用用户再点一次
+            chatVM.notePendingVoiceCall()
             Task { await chatVM.connect() }
             return
         }
@@ -456,6 +483,7 @@ struct ConversationView: View {
     }
 
     private func endVoiceCall() {
+        chatVM.cancelPendingVoiceCall()
         chatVM.stopRealtimeConversation()
         callStartedAt = nil
         callElapsedSeconds = 0
@@ -463,6 +491,7 @@ struct ConversationView: View {
     }
 
     private func switchCallToPushToTalk() {
+        chatVM.cancelPendingVoiceCall()
         chatVM.stopRealtimeConversation()
         callStartedAt = nil
         callElapsedSeconds = 0
@@ -470,6 +499,7 @@ struct ConversationView: View {
     }
 
     private func leaveVoiceMode() {
+        chatVM.cancelPendingVoiceCall()
         if isPressingToTalk {
             isPressingToTalk = false
             chatVM.stopUserSpeech()
@@ -844,6 +874,24 @@ private struct ServiceSettingsSheet: View {
         .onAppear {
             migrateLegacyEndpointIfNeeded()
         }
+    }
+}
+
+// MARK: - 第一响应者查找（读输入框真实文本用）
+
+extension UIResponder {
+    private static weak var _currentFirstResponder: UIResponder?
+
+    /// 当前第一响应者（通过 responder chain 查找）。发送时用它读底层 UITextField 的 text，
+    /// 才能拿到中文输入法未确认的 marked text；SwiftUI 的绑定在 marked text 期间不同步。
+    static var currentFirstResponder: UIResponder? {
+        _currentFirstResponder = nil
+        UIApplication.shared.sendAction(#selector(UIResponder.captureFirstResponder(_:)), to: nil, from: nil, for: nil)
+        return _currentFirstResponder
+    }
+
+    @objc private func captureFirstResponder(_ sender: Any?) {
+        UIResponder._currentFirstResponder = self
     }
 }
 
