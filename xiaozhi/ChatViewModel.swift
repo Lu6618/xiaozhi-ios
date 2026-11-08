@@ -929,7 +929,9 @@ class ChatViewModel: ObservableObject {
             do {
                 var request = URLRequest(url: url)
                 request.httpMethod = "POST"
-                request.timeoutInterval = 60
+                // 单次 90 秒：Worker 侧视觉上游超时已放宽到 60 秒，App 必须比它更宽，
+                // 否则 Worker 还没回包 App 就先断了（60 秒旧值会把 Worker 的慢响应误判成超时）。
+                request.timeoutInterval = 90
                 request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                 request.httpBody = try JSONSerialization.data(withJSONObject: ["image_base64": base64])
                 let (data, response) = try await URLSession.shared.data(for: request)
@@ -983,7 +985,10 @@ class ChatViewModel: ObservableObject {
             case .cannotFindHost, .cannotConnectToHost:
                 return "连不上识别服务，请检查网络后重新拍照"
             case .secureConnectionFailed:
-                return "安全连接失败，请检查网络后重新拍照"
+                // -1200：TLS 握手失败，3 次重试都失败说明不是瞬断。
+                // 常见于本机代理/MITM 拦截了到识别服务的 TLS 连接
+                // （或系统时间不对、网络本身的 TLS 有问题），所以多给一句代理提示。
+                return "安全连接失败，如开了代理工具请先关掉再试，也可检查网络后重新拍照"
             default:
                 break
             }
