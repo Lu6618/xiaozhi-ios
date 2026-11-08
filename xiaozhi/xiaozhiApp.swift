@@ -14,7 +14,7 @@ struct xiaozhiApp: App {
 //        debugPrintBundleContents()
 //    }
     
-    @StateObject private var chatViewModel = ChatViewModel()
+    @StateObject private var chatViewModel = ChatViewModel.shared
     
     var body: some Scene {
         WindowGroup {

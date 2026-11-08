@@ -126,6 +126,25 @@ struct ConversationView: View {
             chatVM.voiceCallRequested = false
             beginVoiceCall()
         }
+        // CallKit 通话（Siri 唤起）：系统通话进行中时界面切到通话模式；挂断后切回按键模式。
+        .onChange(of: chatVM.callKitCallActive) { active in
+            if active {
+                if mode != .voiceCall {
+                    mode = .voiceCall
+                    if callStartedAt == nil {
+                        callStartedAt = Date()
+                        callElapsedSeconds = 0
+                    }
+                }
+            } else {
+                if mode == .voiceCall {
+                    // 系统界面挂断：通话已由 CallKit 路径停掉，这里只切界面。
+                    callStartedAt = nil
+                    callElapsedSeconds = 0
+                    mode = .pushToTalk
+                }
+            }
+        }
         .onOpenURL { url in
             chatVM.handleDeepLink(url: url)
         }
@@ -706,5 +725,5 @@ private struct ModelSelectorSheet: View {
 
 #Preview {
     ConversationView()
-        .environmentObject(ChatViewModel())
+        .environmentObject(ChatViewModel.shared)
 }
