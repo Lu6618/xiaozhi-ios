@@ -230,7 +230,15 @@ class ChatViewModel: ObservableObject {
 
     @MainActor
     func processSelectedImage(_ image: UIImage) {
-        guard let data = image.jpegData(compressionQuality: 0.72) else { return }
+        // 相册原图常是 4032×3024，base64 有好几 MB，上传慢、容易断；
+        // 先缩到最长边 1024 再 JPEG 0.8（和相机 800px / 0.6 同一思路），识别够用
+        let sized: UIImage
+        if max(image.size.width, image.size.height) > 1024 {
+            sized = image.resized(toWidth: 1024) ?? image
+        } else {
+            sized = image
+        }
+        guard let data = sized.jpegData(compressionQuality: 0.8) else { return }
         processCapturedImage(base64Str: data.base64EncodedString())
     }
 
@@ -923,11 +931,13 @@ class ChatViewModel: ObservableObject {
                     // 会被静默丢弃、小智永远不回（build 112 的教训：图片识别不返回任何内容）。
                     // 语音注入是 App 里唯一能让服务器回话的路径（打字消息也走这条路）。
                     // 内容只发净化后的画面描述（去掉“照片/图片/图/拍”等触发词），
-                    // 末尾加“你觉得怎么样？”让小智直接给看法、不去调工具；
-                    // showBubble=false，用户只看到照片和小智的回复。
+                    // 末尾加“你觉得怎么样？”让小智直接给看法、不去调工具。
+                    // 注意 showBubble 必须传 true：它的语义是反直觉的——传 true 才表示
+                    // “这次是静默注入”，服务器回传的 STT 转写会被 isShowBubble 吞掉、不显示气泡；
+                    // 传 false 回显会正常上屏，描述会以蓝色气泡显示出来（build 114 传错了 false）。
                     var clean = Self.sanitizeVisionDescription(result)
                     if clean.isEmpty { clean = result }
-                    self.injectVoiceCommand(text: "\(clean)。你觉得怎么样？", showBubble: false)
+                    self.injectVoiceCommand(text: "\(clean)。你觉得怎么样？", showBubble: true)
                 }
                 
             } catch {
@@ -939,7 +949,7 @@ class ChatViewModel: ObservableObject {
                     // MCP 任务失败也要回执，否则服务器会一直等工具结果
                     mcpManager.sendError(id: reqId, sessionId: sid, message: "图片识别失败")
                 } else {
-                    let reason = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    let reason = Self.visionErrorMessage(error)
                     self.speakLocally(text: "图片识别失败：\(reason)")
                 }
             }
@@ -947,7 +957,30 @@ class ChatViewModel: ObservableObject {
     }
     
     // MARK: - 视觉结果交付（防相机误触发）
-    
+
+    /// 把视觉失败原因翻译成人话：URLError 的英文原文（The network connection was lost.）
+    /// 用户看不懂，按错误码给中文说明；其他错误沿用原有描述。
+    /// 注意：重试已在 VisionService.post 里做过（最多 3 次），走到这里就是 3 次都失败了。
+    private static func visionErrorMessage(_ error: Error) -> String {
+        if let urlError = error as? URLError {
+            switch urlError.code {
+            case .networkConnectionLost:
+                return "网络连接中断，已自动重试 3 次仍失败，请检查网络后重新拍照"
+            case .timedOut:
+                return "请求超时，已自动重试 3 次仍失败，模型响应太慢或网络较慢"
+            case .notConnectedToInternet:
+                return "没有网络连接，请检查 Wi-Fi 或流量"
+            case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed:
+                return "连不上视觉服务地址，请检查设置里的地址是否正确"
+            case .secureConnectionFailed:
+                return "安全连接失败，请检查网络或服务地址"
+            default:
+                break
+            }
+        }
+        return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+    }
+
     /// 净化视觉识别结果：去掉“照片/图片/图/拍”等会触发小智调相机的词。
     /// “图”只去固定搭配（图中/图里/这张图），不单字去，以免误伤“地图/图案”等词；
     /// “看”也不动（“看起来”是形容词，大模型能分清它和“看一下”的区别）。
@@ -1537,7 +1570,9 @@ extension ChatViewModel: DouyinManagerDelegate {
         
         print(">>> 🤫 开始静默注入: \(text)")
         
-        // 1. 只有 showBubble 为 true 时，才在 UI 上不显示“我发出的消息”
+        // 注意：这里的 showBubble 语义是反直觉的——传 true 表示“这次是静默注入”，
+        // 服务器回传的 STT 转写会被 isShowBubble 吞掉、不显示成气泡；
+        // 传 false 则回显正常上屏。视觉路径必须传 true，否则描述会以蓝色气泡显示出来。
         if showBubble {
             isShowBubble = true
         }
