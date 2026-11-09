@@ -15,6 +15,10 @@
 //   懒创建：intent 里第一次碰 CallKitManager.shared 才创建 provider，毫秒后就发
 //   transaction，系统可能还没完成 provider 注册 → action 判无效。修法：App 启动
 //   时就创建 provider（xiaozhiApp.init），且创建不足 1 秒时先等满 1 秒再发 transaction。
+// - build 146（诊断版）：build 145 实测 error 6 仍在、系统通话数 0，懒创建理论已死。
+//   剩余两种可能：(A) intent/后台语境问题；(B) provider 配置/action 本身无效。
+//   诊断：App 内加“测试 CallKit 拨打”按钮（前台调同一条 startCallKitCall），
+//   并把完整 NSError 细节拼进 intent 路径的报错信息。
 
 import Foundation
 import CallKit
@@ -126,7 +130,11 @@ final class CallKitManager: NSObject {
                         let nsError = requestError as NSError
                         let callCount = self.callObserver.calls.count
                         print("‼️ CallKit request failed: domain=\(nsError.domain) code=\(nsError.code) userInfo=\(nsError.userInfo) observedCalls=\(callCount)")
-                        self.resumePerformContinuation(with: .rejected("\(requestError.localizedDescription)（系统当前通话数：\(callCount)）"))
+                        // build 146 诊断：把完整 NSError 细节也拼进报错信息（快捷指令弹窗 /
+                        // App 内测试弹窗都能看到），只看 code 猜不出原因；userInfo 截断防过长。
+                        let userInfoText = String(describing: nsError.userInfo).prefix(300)
+                        let detail = "\(requestError.localizedDescription) [\(nsError.domain) code=\(nsError.code) userInfo=\(userInfoText)]（系统当前通话数：\(callCount)）"
+                        self.resumePerformContinuation(with: .rejected(detail))
                     } else {
                         print("📞 CallKit request accepted, waiting for perform…")
                     }

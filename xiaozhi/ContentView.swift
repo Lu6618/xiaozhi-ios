@@ -11,6 +11,10 @@ struct ContentView: View {
 
     @StateObject private var viewModel = ChatViewModel.shared
 
+    // build 146 诊断：App 内 CallKit 拨打测试的结果弹窗
+    @State private var callKitTestResult: String?
+    @State private var showCallKitTestAlert = false
+
     var body: some View {
         NavigationStack {
             VStack(spacing: 0) {
@@ -66,6 +70,29 @@ struct ContentView: View {
                         }
                     }
                     .disabled(viewModel.appState == .connecting || viewModel.appState == .awaitingActivation)
+
+                    // build 146 诊断：前台直接调同一条 startCallKitCall()（与 Siri 快捷指令
+                    // 完全同一入口），区分两种可能：App 内成功而快捷指令失败 → 问题在
+                    // intent/后台语境；App 内也报 error 6 → 问题在 provider 配置/action 本身。
+                    Button("测试 CallKit 拨打") {
+                        Task {
+                            do {
+                                try await viewModel.startCallKitCall()
+                                callKitTestResult = "成功：系统通话界面已出现"
+                            } catch {
+                                callKitTestResult = "失败：\(error.localizedDescription)"
+                            }
+                            showCallKitTestAlert = true
+                        }
+                    }
+                    .font(.footnote)
+                    .foregroundColor(.blue)
+                    .padding(.top, 8)
+                    .alert("CallKit 拨打测试", isPresented: $showCallKitTestAlert) {
+                        Button("好的") {}
+                    } message: {
+                        Text(callKitTestResult ?? "")
+                    }
                 }
                 .padding()
                 .background(Color(UIColor.systemGray6).ignoresSafeArea(.container, edges: .bottom))
