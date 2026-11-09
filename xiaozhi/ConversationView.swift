@@ -126,8 +126,8 @@ struct ConversationView: View {
             chatVM.voiceCallRequested = false
             beginVoiceCall()
         }
-        // CallKit 通话（Siri 唤起）：系统通话进行中时界面切到通话模式；挂断后切回按键模式。
-        .onChange(of: chatVM.callKitCallActive) { active in
+        // 后台语音通话（Siri / 快捷指令唤起）：通话进行中时界面切到通话模式；挂断后切回按键模式。
+        .onChange(of: chatVM.voiceCallActive) { active in
             if active {
                 if mode != .voiceCall {
                     mode = .voiceCall
@@ -138,7 +138,7 @@ struct ConversationView: View {
                 }
             } else {
                 if mode == .voiceCall {
-                    // 系统界面挂断：通话已由 CallKit 路径停掉，这里只切界面。
+                    // 通话结束：这里只切界面，语音已由通话路径停掉。
                     callStartedAt = nil
                     callElapsedSeconds = 0
                     mode = .pushToTalk

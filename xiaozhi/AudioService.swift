@@ -72,9 +72,10 @@ class AudioService {
     private var inputConnected = false
     /// 当前会话模式。
     private var sessionMode: SessionMode = .idle
-    /// CallKit 通话进行中（Siri 唤起的系统通话）：会话全程保持 .playAndRecord，
+    /// 后台语音通话进行中（Siri / 快捷指令唤起的后台通话）：会话全程保持 .playAndRecord，
     /// 不切 .playback、不释放（否则通话中途断麦、改路由）。
-    var callKitCallActive = false
+    /// （原名 callKitCallActive，随 CallKit 移除改名；语义不变。）
+    var voiceCallActive = false
     /// 会话当前是否处于激活状态（setActive(true) 后为 true）。
     private var sessionActive = false
     /// 串行化会话切换：同一时间只有一个切换任务在跑，避免录音/播放切换互相打架。
@@ -158,9 +159,9 @@ class AudioService {
                 engine.stop()
                 // ✅✅✅ 修改 1: Mode 改为 .default (最听话的模式) ✅✅✅
                 // .voiceChat 和 .videoChat 都有很强的系统预设，.default 最容易被 option 覆盖
-                if callKitCallActive {
-                    // CallKit 通话：用 .voiceChat（系统通话回声消除、默认听筒），不加 .defaultToSpeaker
-                    //（通话该走听筒，用户要免提点系统通话界面的扬声器）；App 内通话保持原来的 .default + 扬声器。
+                if voiceCallActive {
+                    // 后台语音通话：用 .voiceChat（系统通话回声消除、默认听筒），不加 .defaultToSpeaker
+                    //（通话该走听筒，用户要免提点 App 内通话界面的扬声器）；App 内按住说话保持原来的 .default + 扬声器。
                     try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .allowBluetoothA2DP])
                 } else {
                     try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP, .allowAirPlay])
@@ -270,9 +271,9 @@ class AudioService {
     /// - 只剩播放：降回 .playback——麦克风立即释放，小智回复继续播。
     /// - 都停了：停引擎、释放会话，麦克风还给系统（不做后台保活，后台断了回前台重连）。
     private func settleSessionAfterStop() {
-        // CallKit 通话中：会话全程保持 .playAndRecord，录音 tap 随听/说开关，
-        // 但会话本身不降级、不释放（通话结束时 endCallKitAudio() 再释放）。
-        if callKitCallActive { return }
+        // 后台语音通话中：会话全程保持 .playAndRecord，录音 tap 随听/说开关，
+        // 但会话本身不降级、不释放（通话结束时 endVoiceCallAudio() 再释放）。
+        if voiceCallActive { return }
         guard engineConfigured else { return }
         if isRecording { return }
         if isPlaying {
@@ -292,16 +293,16 @@ class AudioService {
         }
     }
 
-    /// CallKit 通话结束：清掉通话标记；若已无录音/播放，走正常释放路径。
-    func endCallKitAudio() {
-        callKitCallActive = false
+    /// 后台语音通话结束：清掉通话标记；若已无录音/播放，走正常释放路径。
+    func endVoiceCallAudio() {
+        voiceCallActive = false
         settleSessionAfterStop()
     }
 
     // ✅ 强力切扬声器（只在录音模式下有意义；.playback 本来就走扬声器）
     func forceSpeaker() {
-        // CallKit 通话中：路由归系统通话界面管（听筒/扬声器/蓝牙），不强制切扬声器。
-        guard !callKitCallActive else { return }
+        // 后台语音通话中：路由归系统通话界面管（听筒/扬声器/蓝牙），不强制切扬声器。
+        guard !voiceCallActive else { return }
         // 会话未激活或不在录音模式时不碰路由，避免空闲/播放时意外重新占用麦克风
         guard engine.isRunning, sessionMode == .record else { return }
         let session = AVAudioSession.sharedInstance()
@@ -415,8 +416,8 @@ class AudioService {
     // MARK: - 播放
     func prepareToPlay() {
         guard !isPlaying else { return }
-        if callKitCallActive {
-            // CallKit 通话中：会话保持 .playAndRecord（不能切 .playback，否则断麦、改路由），直接起播放器。
+        if voiceCallActive {
+            // 后台语音通话中：会话保持 .playAndRecord（不能切 .playback，否则断麦、改路由），直接起播放器。
             startPlayback()
             return
         }

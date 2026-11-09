@@ -199,10 +199,10 @@ class ChatViewModel: ObservableObject {
     @MainActor
     func handleForegroundReturn() {
         guard !userDisconnected, appState != .awaitingActivation else { return }
-        // CallKit 通话进行中且 socket 还活着：别强制重连，会打断通话。
+        // 后台语音通话进行中且 socket 还活着：别强制重连，会打断通话。
         // （通话中 App 靠音频后台模式活着，socket 的关闭事件能正常送达，isConnected 可信；
         //  若 socket 已死，走下面的重连，hello 到达后免提通话自动恢复。）
-        if isCallKitCall && webSocketManager.isConnected { return }
+        if voiceCallActive && webSocketManager.isConnected { return }
         isReconnecting = true
         appState = .connecting
         if currentSessionId != nil {
@@ -323,8 +323,6 @@ class ChatViewModel: ObservableObject {
                 self.activationMessage = activationInfo.message
                 self.showActivationAlert = true
                 startPollingForActivation()
-                // CallKit 通话等激活码：系统通话界面等不到接通，直接挂断（用户先去 App 里填六位码再打）。
-                failCallKitCallIfNeeded()
             } else {
                 stopPollingForActivation()
                 self.showActivationAlert = false
@@ -341,32 +339,18 @@ class ChatViewModel: ObservableObject {
                 
                 } else {
                     self.appState = .connectionFailed
-                    // OTA 没给 websocket 地址：CallKit 通话建不起来，直接挂断系统通话。
-                    failCallKitCallIfNeeded()
                 }
             }
         } catch {
             print("OTA Error: \(error)")
             if activationPollingTask == nil {
                 self.appState = .connectionFailed
-                // OTA/连接失败：CallKit 通话建不起来，直接挂断系统通话。
-                failCallKitCallIfNeeded()
             }
         }
     }
     
     @MainActor
     func disconnect() {
-        // 正在 CallKit 通话：先让系统通话界面挂断（delegate 回调会再调 endCallKitCall 收尾）。
-        if isCallKitCall {
-            CallKitManager.shared.endCall()
-            isCallKitCall = false
-            pendingCallKitCall = false
-            callKitCallActive = false
-            callKitFailureWatchdog?.cancel()
-            callKitFailureWatchdog = nil
-            audioService.endCallKitAudio()
-        }
         // 1. 调用 WebSocketManager 的断开 (这里 webSocketManager 是 ViewModel 的属性)
         webSocketManager.disconnect(reason: "User Exit")
         userDisconnected = true
@@ -398,18 +382,11 @@ class ChatViewModel: ObservableObject {
     private var pendingDeepLinkText: String?
 
     // ----------------------------------------------------------------
-    // MARK: - CallKit 通话（Siri 后台通话，build 128）
+    // MARK: - 后台语音通话（Siri / 快捷指令；CallKit 已整段移除）
     // ----------------------------------------------------------------
-    /// CallKit 通话进行中（Siri 唤起的系统通话）。View 据此切到通话界面。
-    @Published var callKitCallActive = false
-    /// 当前通话是否走 CallKit（Siri 路径）。App 内通话为 false。
-    private var isCallKitCall = false
-    /// CallKit 通话已发起、等 hello 后进通话（未连接时）。
-    private var pendingCallKitCall = false
-    /// CallKit 通话中断线看门狗：socket 断了 20 秒还没恢复就挂断系统通话，避免界面卡死。
-    private var callKitFailureWatchdog: Task<Void, Never>?
-    /// 正在发起 CallKit 通话（防两次 intent 并发进 startCallKitCall）。
-    private var isStartingCallKitCall = false
+    /// 后台语音通话进行中（Siri / 快捷指令唤起）。View 据此切到通话界面。
+    /// Build 1 仅改名保留（原 callKitCallActive），状态机与 intent 入口在 Build 2 接线。
+    @Published var voiceCallActive = false
 
     /// 一键通话入口（deep link 用）：标记待进通话，并通知 View 切界面。
     @MainActor
@@ -434,7 +411,7 @@ class ChatViewModel: ObservableObject {
     /// 处理外部 URL：
     /// - xiaozhi://call —— 打开 App 后直接开始语音通话（免提，自动连接、自动进通话）
     /// - xiaozhi://call?text=你好 —— 同上，通话开始后把这句话直接发给小智
-    /// - xiaozhi://end —— 结束通话并断开连接（CallKit 通话也一并挂断）
+    /// - xiaozhi://end —— 结束通话并断开连接
     /// - xiaozhi://chat —— 打开到聊天页（默认行为，什么都不做）
     @MainActor
     func handleDeepLink(url: URL) {
@@ -466,90 +443,6 @@ class ChatViewModel: ObservableObject {
         }
     }
 
-    // ----------------------------------------------------------------
-    // MARK: - CallKit 通话入口与收尾（Siri 后台通话，build 128）
-    // ----------------------------------------------------------------
-
-    /// Siri 入口：开始 CallKit 通话（后台跑，不打开 App）。
-    /// 等系统真正递送 perform（通话界面出现）才返回——只等 request completion
-    /// 就返回会导致 intent 结束、App 被挂起，perform 永远送不到、界面不出现
-    /// （build 137 实测：快捷指令显示打勾完成，但始终没通话界面）。
-    /// 失败（被拒/超时/通话中）时抛中文错，快捷指令会显示失败原因。
-    @MainActor
-    func startCallKitCall() async throws {
-        guard !isStartingCallKitCall else {
-            throw XiaozhiCallError(message: "正在发起通话，请稍候")
-        }
-        isStartingCallKitCall = true
-        defer { isStartingCallKitCall = false }
-        // 残留的僵尸通话：管理器里还有 UUID，但 ViewModel 并不在通话中
-        // （上次去电没等到 perform，或挂断的 perform 没回来）→ 先清掉再发起，
-        // 否则 guard 直接 return、什么都不发生。
-        if CallKitManager.shared.isCallActive, !isCallKitCall {
-            print("⚠️ CallKit stale call found (manager has UUID, ViewModel not in call), resetting")
-            CallKitManager.shared.resetStaleCall()
-            pendingCallKitCall = false
-            callKitCallActive = false
-            callKitFailureWatchdog?.cancel()
-            callKitFailureWatchdog = nil
-            audioService.endCallKitAudio()
-        }
-        guard !CallKitManager.shared.isCallActive else {
-            throw XiaozhiCallError(message: "小智正在通话中")
-        }
-        CallKitManager.shared.delegate = self
-        isCallKitCall = true
-        pendingCallKitCall = false
-        audioService.callKitCallActive = true
-        switch await CallKitManager.shared.startOutgoingCall() {
-        case .performed:
-            return
-        case .rejected(let message):
-            throw XiaozhiCallError(message: "发起通话失败：\(message ?? "系统拒绝了请求")，请重试")
-        case .timedOut:
-            throw XiaozhiCallError(message: "发起通话超时，系统没有响应，请重试")
-        }
-    }
-
-    /// 结束 CallKit 通话（系统界面挂断 / 通话失败时调）。
-    /// 只停语音对话、不断连接（和 App 内挂断一致）；后台 socket 自然消亡，回前台重连。
-    @MainActor
-    func endCallKitCall() {
-        isCallKitCall = false
-        pendingCallKitCall = false
-        callKitCallActive = false
-        callKitFailureWatchdog?.cancel()
-        callKitFailureWatchdog = nil
-        stopRealtimeConversation()
-        audioService.endCallKitAudio()
-    }
-
-    /// CallKit 通话建不起来（OTA 失败 / 需激活）：挂断系统通话。
-    @MainActor
-    private func failCallKitCallIfNeeded() {
-        guard isCallKitCall || pendingCallKitCall else { return }
-        isCallKitCall = false
-        pendingCallKitCall = false
-        callKitCallActive = false
-        callKitFailureWatchdog?.cancel()
-        callKitFailureWatchdog = nil
-        audioService.endCallKitAudio()
-        CallKitManager.shared.reportFailed()
-    }
-
-    /// 通话中断线看门狗：socket 断了 20 秒还没恢复就挂断系统通话，避免界面卡死。
-    /// hello 到达（重连成功）或通话结束时取消。
-    @MainActor
-    private func startCallKitFailureWatchdog() {
-        callKitFailureWatchdog?.cancel()
-        callKitFailureWatchdog = Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 20_000_000_000)
-            guard !Task.isCancelled else { return }
-            guard self.isCallKitCall, !self.isConnected else { return }
-            self.failCallKitCallIfNeeded()
-        }
-    }
-    
     private func stopPollingForActivation() {
         activationPollingTask?.cancel()
         activationPollingTask = nil
@@ -948,11 +841,6 @@ class ChatViewModel: ObservableObject {
         audioService.stopPlaying()
         audioService.stopRecording()
         appState = .idle
-        // CallKit 通话中从 App 内挂断/切回按键：同步挂断系统通话。
-        // （endCallKitCall 里已先把 isCallKitCall 置 false，不会循环。）
-        if isCallKitCall {
-            CallKitManager.shared.endCall()
-        }
     }
 
     @MainActor
@@ -1292,11 +1180,6 @@ extension ChatViewModel: WebSocketManagerDelegate {
                 self.audioService.stopRecording()
                 self.audioService.stopPlaying()
                 self.isLocalSpeaking = false
-
-                // CallKit 通话中掉线：先让自动重连跑（build 90 的退避），20 秒还连不上再挂断系统通话。
-                if self.isCallKitCall {
-                    self.startCallKitFailureWatchdog()
-                }
             }
         }
     }
@@ -1313,39 +1196,19 @@ extension ChatViewModel: WebSocketManagerDelegate {
             self.currentSessionId = sessionId
             // 会话建立：重连成功，清除“正在重连…”显示
             self.isReconnecting = false
-            // CallKit 通话中重连成功：取消掉线看门狗。
-            self.callKitFailureWatchdog?.cancel()
-            self.callKitFailureWatchdog = nil
-            // CallKit 通话（Siri 唤起）：不走 View 的 voiceCallRequested，直接在 ViewModel 里进通话。
-            // 先 stopRecording() 重置音频状态（和下面第 4 步同义，这里先做），再进通话；
-            // callKitJustStarted 让下面不再重复停录音、也不再补发 listen start。
-            var callKitJustStarted = false
-            if self.pendingCallKitCall {
-                self.pendingCallKitCall = false
-                self.pendingVoiceCall = false
-                self.audioService.stopRecording()
-                self.callKitCallActive = true
-                self.startRealtimeConversation()
-                CallKitManager.shared.reportConnected()
-                callKitJustStarted = true
-            } else if self.pendingVoiceCall {
+            if self.pendingVoiceCall {
                 // 一键通话：冷启动/未连接时点的通话，连上后自动进通话
                 self.pendingVoiceCall = false
                 self.voiceCallRequested = true
             }
-            
-            // 强制重置音频状态，防止引擎卡死（CallKit 刚进通话时跳过，上面已起好录音）
-            if !callKitJustStarted {
-                self.audioService.stopRecording()
-            }
-            
+
+            // 强制重置音频状态，防止引擎卡死
+            self.audioService.stopRecording()
+
             if self.isHandsFreeMode {
                 // 延迟一点点启动，给 AudioEngine 喘息机会
-                // （CallKit 刚进通话时跳过：startRealtimeConversation 已发过 listen start）
-                if !callKitJustStarted {
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        self.startAutoListening()
-                    }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    self.startAutoListening()
                 }
             } else {
                 self.appState = .idle
@@ -1776,64 +1639,4 @@ extension ChatViewModel: DouyinManagerDelegate {
     }
 }
 
-// ----------------------------------------------------------------
-// MARK: - CallKit Manager Delegate（Siri 系统通话，build 128）
-// ----------------------------------------------------------------
-
-extension ChatViewModel: CallKitManagerDelegate {
-
-    /// 系统接受了去电请求：开始连接（已连接就直接进通话）。
-    @MainActor
-    func callKitDidPerformStartCall() {
-        CallKitManager.shared.reportConnecting()
-        if isConnected, currentSessionId != nil {
-            callKitCallActive = true
-            startRealtimeConversation()
-            CallKitManager.shared.reportConnected()
-        } else {
-            pendingCallKitCall = true
-            // 20 秒内连不上（hello 未到）就挂断系统通话，避免“正在呼叫…”卡死；
-            // WS 层自己会指数退避重连，hello 到达时看门狗已取消。
-            startCallKitFailureWatchdog()
-            Task { await connect() }
-        }
-    }
-
-    /// 系统通话界面挂断：结束语音对话，界面切回（不断连接，和 App 内挂断一致）。
-    @MainActor
-    func callKitDidEndCall() {
-        endCallKitCall()
-    }
-
-    /// 系统通话界面静音开关。
-    @MainActor
-    func callKitDidSetMuted(_ muted: Bool) {
-        setMicrophoneMuted(muted)
-    }
-
-    /// 去电请求被系统拒绝：清理通话状态。
-    @MainActor
-    func callKitDidFailToStart() {
-        isCallKitCall = false
-        pendingCallKitCall = false
-        callKitCallActive = false
-        audioService.endCallKitAudio()
-    }
-
-    /// CallKit 激活了音频会话（通话开始 / 被电话打断后恢复）：
-    /// 若正在免提通话且应监听但没在录，恢复录音。
-    @MainActor
-    func callKitAudioSessionDidActivate() {
-        guard isCallKitCall, isHandsFreeMode, currentSessionId != nil,
-              appState == .listening, !audioService.isRecording else { return }
-        audioService.startRecording()
-    }
-
-    /// CallKit 释放了音频会话（通话结束 / 被电话打断）：暂停音频。
-    @MainActor
-    func callKitAudioSessionDidDeactivate() {
-        audioService.stopRecording()
-        audioService.stopPlaying()
-    }
-}
 
