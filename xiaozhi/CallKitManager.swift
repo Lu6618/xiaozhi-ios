@@ -1,14 +1,20 @@
-// 文件: CallKitManager.swift (build 128 - Siri/CallKit 后台通话；build 138 修 intent 提前返回)
+// 文件: CallKitManager.swift (build 128 - Siri/CallKit 后台通话；build 138 修 intent 提前返回；build 144 修 error 6 invalidAction)
 //
 // Siri 唤起的系统通话：CallKit 只负责“通话壳子”（系统通话界面、挂断/静音、
 // 音频会话激活），真正的连接、语音流、MCP 工具仍走 ChatViewModel / AudioService / WebSocketManager。
 // 设计要点：
 // - 只在 Siri 路径启用 CallKit；App 内通话不走 CallKit（不改现有流程、不动 in-app UI）。
-// - 打出去的电话不需要 PushKit，所以不加 voip 后台模式、不改包名。
+// - 打出去的电话不需要 PushKit（没人能发推送）；但 voip 后台模式必须加
+//   （build 143：无 voip 时系统以 unentitled / error 1 拒绝去电）。不改包名。
 // - 每通电话一个新 UUID；系统界面挂断/静音经 CXProviderDelegate 回到 ChatViewModel。
 // - build 138：startOutgoingCall 等 perform 真正到达才返回（只等 request completion
 //   就返回会导致 intent 结束、App 被挂起，perform 送不到、通话界面不出现；
 //   build 137 实测：快捷指令打勾完成，但始终没通话界面）。10 秒总超时兜底。
+// - build 144：error 6 = invalidAction（现行枚举；旧枚举说的 maximumCallsPerCallGroupReached
+//   在现行枚举里不存在，僵尸电话理论作废，重启与此无关）。头号嫌疑是 provider
+//   懒创建：intent 里第一次碰 CallKitManager.shared 才创建 provider，毫秒后就发
+//   transaction，系统可能还没完成 provider 注册 → action 判无效。修法：App 启动
+//   时就创建 provider（xiaozhiApp.init），且创建不足 1 秒时先等满 1 秒再发 transaction。
 
 import Foundation
 import CallKit
@@ -53,6 +59,12 @@ final class CallKitManager: NSObject {
     private let provider: CXProvider
     private let callController = CXCallController()
 
+    /// provider 创建时间（build 144）：去电 transaction 若在 provider 刚创建
+    /// （系统尚未完成注册）时发出，会被判 invalidAction（error 6）。
+    private let providerCreatedAt: Date
+    /// 系统当前通话快照（build 144 诊断用；只读 .calls，无需设 delegate）。
+    private let callObserver = CXCallObserver()
+
     /// 当前 CallKit 通话的 UUID（nil = 无通话）。
     private(set) var currentCallUUID: UUID?
     /// 是否有 CallKit 通话在进行（已发起去电、尚未结束）。
@@ -81,6 +93,7 @@ final class CallKitManager: NSObject {
         // 不写入系统最近通话：小智是助手不是联系人，点最近通话回拨没有意义。
         config.includesCallsInRecents = false
         self.provider = CXProvider(configuration: config)
+        providerCreatedAt = Date()
         super.init()
         provider.setDelegate(self, queue: .main)
     }
@@ -96,15 +109,24 @@ final class CallKitManager: NSObject {
         let handle = CXHandle(type: .generic, value: "小智")
         let action = CXStartCallAction(call: uuid, handle: handle)
         action.isVideo = false
-        print("📞 CallKit request start: \(uuid)")
+        // build 144：provider 创建不足 1 秒时先等满 1 秒再发 transaction，
+        // 让系统有时间完成 provider 注册，否则 action 会被判 invalidAction（error 6）。
+        let elapsed = Date().timeIntervalSince(providerCreatedAt)
+        if elapsed < 1 {
+            print("📞 CallKit provider created \(String(format: "%.2f", elapsed))s ago, waiting until 1s before request")
+            try? await Task.sleep(nanoseconds: UInt64((1 - elapsed) * 1_000_000_000))
+        }
+        print("📞 CallKit request start: \(uuid) (provider created at \(providerCreatedAt), request at \(Date()), observed calls: \(callObserver.calls.count))")
         let outcome: StartCallOutcome = await withCheckedContinuation { continuation in
             performContinuation = continuation
             callController.request(CXTransaction(action: action)) { requestError in
                 // request 回调可能不在主线程：跳回主线程再 resume（所有 resume 点都在主线程上串行）。
                 Task { @MainActor in
                     if let requestError {
-                        print("‼️ CallKit request failed: \(requestError.localizedDescription)")
-                        self.resumePerformContinuation(with: .rejected(requestError.localizedDescription))
+                        let nsError = requestError as NSError
+                        let callCount = self.callObserver.calls.count
+                        print("‼️ CallKit request failed: domain=\(nsError.domain) code=\(nsError.code) userInfo=\(nsError.userInfo) observedCalls=\(callCount)")
+                        self.resumePerformContinuation(with: .rejected("\(requestError.localizedDescription)（系统当前通话数：\(callCount)）"))
                     } else {
                         print("📞 CallKit request accepted, waiting for perform…")
                     }
