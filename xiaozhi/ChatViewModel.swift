@@ -323,6 +323,8 @@ class ChatViewModel: ObservableObject {
                 self.activationMessage = activationInfo.message
                 self.showActivationAlert = true
                 startPollingForActivation()
+                // intent 建通话时走到激活：让等 hello 的 intent 直接报“去 App 里激活”，不用等 30 秒超时。
+                self.failBackgroundCallIfNeeded(stage: "激活", reason: "需要先在 App 里完成六位码激活")
             } else {
                 stopPollingForActivation()
                 self.showActivationAlert = false
@@ -339,6 +341,7 @@ class ChatViewModel: ObservableObject {
                 
                 } else {
                     self.appState = .connectionFailed
+                    self.failBackgroundCallIfNeeded(stage: "OTA", reason: "服务器未返回通话地址")
                 }
             }
         } catch {
@@ -346,6 +349,7 @@ class ChatViewModel: ObservableObject {
             if activationPollingTask == nil {
                 self.appState = .connectionFailed
             }
+            self.failBackgroundCallIfNeeded(stage: "OTA", reason: "连接失败，请检查网络后重试")
         }
     }
     
@@ -368,6 +372,14 @@ class ChatViewModel: ObservableObject {
         pendingVoicePackets.removeAll()
         pendingVoiceDate = nil
         stopPollingForActivation()
+        // 彻底断开：后台通话一并结束（xiaozhi://end 走这里）。
+        pendingBackgroundCall = false
+        backgroundCallState = .idle
+        voiceCallActive = false
+        callStartedAt = nil
+        callFailureWatchdog?.cancel()
+        callFailureWatchdog = nil
+        resumeBackgroundCallContinuation(with: .failure(XiaozhiCallError(message: "通话已结束")))
     }
 
     // ----------------------------------------------------------------
@@ -384,9 +396,222 @@ class ChatViewModel: ObservableObject {
     // ----------------------------------------------------------------
     // MARK: - 后台语音通话（Siri / 快捷指令；CallKit 已整段移除）
     // ----------------------------------------------------------------
+    /// 后台语音通话状态机（Siri / 快捷指令唤起的通话）。与 appState 并存，只描述通话本身。
+    enum BackgroundCallState: Equatable {
+        case idle        // 未通话
+        case starting    // 正在建立（等连接/hello）
+        case active      // 通话中
+        case failed(String) // 最近一次建立失败，附中文原因
+    }
+    /// 后台通话状态（intent 查询用；View 也可据此显示通话中）。
+    @Published var backgroundCallState: BackgroundCallState = .idle
     /// 后台语音通话进行中（Siri / 快捷指令唤起）。View 据此切到通话界面。
-    /// Build 1 仅改名保留（原 callKitCallActive），状态机与 intent 入口在 Build 2 接线。
+    /// （原名 callKitCallActive，随 CallKit 移除改名；语义不变。）
     @Published var voiceCallActive = false
+    /// intent 在未连接时标记：hello 到达后自动进通话。
+    private var pendingBackgroundCall = false
+    /// 正在建立后台通话（防两次 intent 并发进 startBackgroundCall）。
+    private var isStartingBackgroundCall = false
+    /// 通话开始时间（CallStatusIntent 算通话时长用；View 的计时显示也以它为准）。
+    @Published var callStartedAt: Date?
+    /// 等 hello 的 continuation（startBackgroundCall 挂起等它；hello 到达 / 失败 / 超时三路抢 resume）。
+    private var backgroundCallContinuation: CheckedContinuation<Void, Error>?
+    /// 等 hello 的超时任务（30 秒）。
+    private var backgroundCallTimeoutTask: Task<Void, Never>?
+    /// 断线看门狗（通话中掉线 20 秒未恢复则自动挂断并记日志）。
+    private var callFailureWatchdog: Task<Void, Never>?
+
+    /// 通话失败记录（最近 10 条，存 UserDefaults；intent 报错与 CallStatusIntent 的“上次失败”都读它）。
+    struct CallFailureEntry: Codable {
+        let time: Date
+        let stage: String
+        let reason: String
+    }
+    private let callFailureLogKey = "xiaozhi.callFailureLog"
+    private var callFailureLog: [CallFailureEntry] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: callFailureLogKey),
+                  let log = try? JSONDecoder().decode([CallFailureEntry].self, from: data) else { return [] }
+            return log
+        }
+        set {
+            let trimmed = Array(newValue.suffix(10))
+            if let data = try? JSONEncoder().encode(trimmed) {
+                UserDefaults.standard.set(data, forKey: callFailureLogKey)
+            }
+        }
+    }
+    /// 记一条通话失败（写日志点：OTA 失败、无 WS 地址、WS 失败、hello 超时、麦克风未授权、中断恢复失败、看门狗触发）。
+    private func logCallFailure(stage: String, reason: String) {
+        var log = callFailureLog
+        log.append(CallFailureEntry(time: Date(), stage: stage, reason: reason))
+        callFailureLog = log
+    }
+
+    /// Siri / 快捷指令入口：开始和小智语音通话（后台跑，不打开 App）。
+    /// 幂等：已在通话中直接返回；未连接时先连，等 hello（30 秒超时）再进通话。
+    /// 麦克风未授权 / 未激活时直接抛中文错，不弹任何授权窗（后台唤起绝不弹授权）。
+    @MainActor
+    func startBackgroundCall() async throws {
+        if backgroundCallState == .active { return }
+        guard !isStartingBackgroundCall else {
+            throw XiaozhiCallError(message: "正在建立通话，请稍候")
+        }
+        // 麦克风权限：后台唤起绝不弹授权窗；未授权直接抛错，让用户先去 App 里授权。
+        switch AVAudioApplication.shared.recordPermission {
+        case .granted:
+            break
+        case .denied, .undetermined:
+            logCallFailure(stage: "麦克风", reason: "麦克风未授权")
+            backgroundCallState = .failed("麦克风未授权")
+            throw XiaozhiCallError(message: "麦克风未授权，请打开小智 App，按提示去设置里开启麦克风")
+        @unknown default:
+            logCallFailure(stage: "麦克风", reason: "麦克风未授权")
+            backgroundCallState = .failed("麦克风未授权")
+            throw XiaozhiCallError(message: "麦克风未授权，请打开小智 App，按提示去设置里开启麦克风")
+        }
+        // 等待激活：先去 App 里完成六位码激活。
+        if appState == .awaitingActivation {
+            logCallFailure(stage: "激活", reason: "等待六位码激活")
+            backgroundCallState = .failed("等待激活")
+            throw XiaozhiCallError(message: "需要先在 App 里完成六位码激活")
+        }
+        isStartingBackgroundCall = true
+        defer { isStartingBackgroundCall = false }
+        // 已连接且有 session：直接进通话。
+        if isConnected, currentSessionId != nil {
+            markBackgroundCallActive()
+            startRealtimeConversation()
+            return
+        }
+        // 未连接：标记待进通话，开始连接，等 hello（30 秒超时）。
+        backgroundCallState = .starting
+        pendingBackgroundCall = true
+        voiceCallActive = true
+        audioService.voiceCallActive = true
+        Task { await connect() }
+        // connect() 可能已同步失败（激活/OTA 错误）：直接抛错，不挂起等 hello。
+        if case .failed(let reason) = backgroundCallState {
+            throw XiaozhiCallError(message: reason)
+        }
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            backgroundCallContinuation = continuation
+            backgroundCallTimeoutTask?.cancel()
+            backgroundCallTimeoutTask = Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+                guard !Task.isCancelled else { return }
+                self.failBackgroundCallIfNeeded(stage: "连接", reason: "连接超时，请重试")
+            }
+        }
+    }
+
+    /// Siri / 快捷指令入口：结束和小智的语音通话。幂等：不在通话中也返回（intent 侧区分文案）。
+    @MainActor
+    func endBackgroundCall() {
+        let wasActive = backgroundCallState == .active || backgroundCallState == .starting
+        pendingBackgroundCall = false
+        backgroundCallState = .idle
+        callFailureWatchdog?.cancel()
+        callFailureWatchdog = nil
+        // 挂起的等 hello（若有）：挂断应让它返回而不是一直等到 30 秒超时。
+        resumeBackgroundCallContinuation(with: .failure(XiaozhiCallError(message: "通话已结束")))
+        if wasActive {
+            stopRealtimeConversation()
+        }
+    }
+
+    /// 只读查询当前通话状态（intent 用；不触碰音频、不建连接）。
+    @MainActor
+    func currentCallStatus() -> String {
+        let base: String
+        switch backgroundCallState {
+        case .active:
+            if let started = callStartedAt {
+                let seconds = Int(Date().timeIntervalSince(started))
+                base = String(format: "小智正在通话中，已通话 %02d:%02d", seconds / 60, seconds % 60)
+            } else {
+                base = "小智正在通话中"
+            }
+        case .starting:
+            base = "小智正在连接，正在建立通话…"
+        case .failed(let reason):
+            base = "小智通话失败：\(reason)"
+        case .idle:
+            if appState == .awaitingActivation {
+                base = "小智等待激活，请先打开 App 完成六位码激活"
+            } else if isHandsFreeMode && isConnected {
+                // App 内免提通话进行中（intent 没建的通话也报一声）。
+                if let started = callStartedAt {
+                    let seconds = Int(Date().timeIntervalSince(started))
+                    base = String(format: "小智正在通话中，已通话 %02d:%02d", seconds / 60, seconds % 60)
+                } else {
+                    base = "小智正在通话中"
+                }
+            } else if isConnected {
+                base = "小智已连接，当前没有在通话"
+            } else {
+                base = "小智未连接"
+            }
+        }
+        // 附加最近一次失败（失败状态本身已含原因，不重复拼）。
+        if case .failed = backgroundCallState { return base }
+        if let last = callFailureLog.last {
+            let time = Self.callFailureTimeString(last.time)
+            return base + "（上次失败：\(last.reason) \(time)）"
+        }
+        return base
+    }
+
+    private static func callFailureTimeString(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "MM-dd HH:mm"
+        return formatter.string(from: date)
+    }
+
+    /// 把后台通话置为 active（intent 直连 / hello 到达两路共用）。
+    @MainActor
+    private func markBackgroundCallActive() {
+        backgroundCallState = .active
+        voiceCallActive = true
+        audioService.voiceCallActive = true
+        if callStartedAt == nil { callStartedAt = Date() }
+    }
+
+    /// 恢复等 hello 的 continuation（只 resume 一次；超时任务一并取消）。
+    @MainActor
+    private func resumeBackgroundCallContinuation(with result: Result<Void, Error>) {
+        guard let continuation = backgroundCallContinuation else { return }
+        backgroundCallContinuation = nil
+        backgroundCallTimeoutTask?.cancel()
+        backgroundCallTimeoutTask = nil
+        continuation.resume(with: result)
+    }
+
+    /// 后台通话建立失败的唯一出口：记日志、置 failed、清通话标志、让等 hello 的 intent 返回错误。
+    /// 只有“正在建立/正在通话/待进通话”时才处理——普通前台连接失败不走这里。
+    @MainActor
+    private func failBackgroundCallIfNeeded(stage: String, reason: String) {
+        guard pendingBackgroundCall || backgroundCallState == .starting || backgroundCallState == .active else { return }
+        logCallFailure(stage: stage, reason: reason)
+        pendingBackgroundCall = false
+        backgroundCallState = .failed(reason)
+        voiceCallActive = false
+        callStartedAt = nil
+        audioService.endVoiceCallAudio()
+        resumeBackgroundCallContinuation(with: .failure(XiaozhiCallError(message: reason)))
+    }
+
+    /// 通话中掉线：启动 20 秒看门狗——自动重连跑着，20 秒还连不上再自动挂断并记日志。
+    @MainActor
+    private func startCallFailureWatchdog() {
+        callFailureWatchdog?.cancel()
+        callFailureWatchdog = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard !Task.isCancelled else { return }
+            guard self.backgroundCallState == .active, !self.isConnected else { return }
+            self.failBackgroundCallIfNeeded(stage: "断线", reason: "网络断开，20 秒未恢复，已自动挂断")
+        }
+    }
 
     /// 一键通话入口（deep link 用）：标记待进通话，并通知 View 切界面。
     @MainActor
@@ -815,6 +1040,8 @@ class ChatViewModel: ObservableObject {
 
     @MainActor
     func startRealtimeConversation() {
+        // 幂等：已在免提通话且正在监听时直接返回，防 intent 与 View 重复触发导致 listen start 发两遍。
+        if isHandsFreeMode && appState == .listening { return }
         guard currentSessionId != nil, webSocketManager.isConnected else {
             appState = .connecting
             Task { await connect() }
@@ -823,6 +1050,7 @@ class ChatViewModel: ObservableObject {
 
         isMicrophoneMuted = false
         setMode(handsFree: true)
+        if callStartedAt == nil { callStartedAt = Date() }
         startAutoListening()
         // deep link 带的一句话（xiaozhi://call?text=...）：通话开始后直接发给小智
         if let text = pendingDeepLinkText, !text.isEmpty {
@@ -841,6 +1069,10 @@ class ChatViewModel: ObservableObject {
         audioService.stopPlaying()
         audioService.stopRecording()
         appState = .idle
+        // 通话结束：清通话标志，会话随之释放（endVoiceCallAudio 内部 settle 时 voiceCallActive 已是 false）。
+        voiceCallActive = false
+        callStartedAt = nil
+        audioService.endVoiceCallAudio()
     }
 
     @MainActor
@@ -1180,6 +1412,11 @@ extension ChatViewModel: WebSocketManagerDelegate {
                 self.audioService.stopRecording()
                 self.audioService.stopPlaying()
                 self.isLocalSpeaking = false
+
+                // 后台通话中掉线：先让自动重连跑（build 90 的退避），20 秒还连不上再自动挂断。
+                if self.backgroundCallState == .active {
+                    self.startCallFailureWatchdog()
+                }
             }
         }
     }
@@ -1194,21 +1431,37 @@ extension ChatViewModel: WebSocketManagerDelegate {
         DispatchQueue.main.async {
             print(">>> ✅ [WS] Session Established: \(sessionId)")
             self.currentSessionId = sessionId
-            // 会话建立：重连成功，清除“正在重连…”显示
+            // 会话建立：重连成功，清除“正在重连…”显示；通话中重连回来也取消看门狗。
             self.isReconnecting = false
-            if self.pendingVoiceCall {
+            self.callFailureWatchdog?.cancel()
+            self.callFailureWatchdog = nil
+            var backgroundCallJustStarted = false
+            if self.pendingBackgroundCall {
+                // Siri / 快捷指令建的后台通话：hello 到达即进通话，让等着的 intent 返回成功。
+                self.pendingBackgroundCall = false
+                self.pendingVoiceCall = false
+                self.audioService.stopRecording()
+                self.markBackgroundCallActive()
+                self.startRealtimeConversation()
+                self.resumeBackgroundCallContinuation(with: .success(()))
+                backgroundCallJustStarted = true
+            } else if self.pendingVoiceCall {
                 // 一键通话：冷启动/未连接时点的通话，连上后自动进通话
                 self.pendingVoiceCall = false
                 self.voiceCallRequested = true
             }
 
-            // 强制重置音频状态，防止引擎卡死
-            self.audioService.stopRecording()
+            // 强制重置音频状态，防止引擎卡死（后台通话刚进通话时跳过，startRealtimeConversation 已在录音）。
+            if !backgroundCallJustStarted {
+                self.audioService.stopRecording()
+            }
 
             if self.isHandsFreeMode {
-                // 延迟一点点启动，给 AudioEngine 喘息机会
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    self.startAutoListening()
+                // 延迟一点点启动，给 AudioEngine 喘息机会（后台通话刚进通话时跳过，避免 listen start 发两遍）。
+                if !backgroundCallJustStarted {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                        self.startAutoListening()
+                    }
                 }
             } else {
                 self.appState = .idle

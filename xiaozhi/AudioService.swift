@@ -76,6 +76,8 @@ class AudioService {
     /// 不切 .playback、不释放（否则通话中途断麦、改路由）。
     /// （原名 callKitCallActive，随 CallKit 移除改名；语义不变。）
     var voiceCallActive = false
+    /// 后台通话中音频被打断前是否正在录音（中断结束恢复用）。
+    private var interruptionWasRecording = false
     /// 会话当前是否处于激活状态（setActive(true) 后为 true）。
     private var sessionActive = false
     /// 串行化会话切换：同一时间只有一个切换任务在跑，避免录音/播放切换互相打架。
@@ -86,6 +88,8 @@ class AudioService {
     private init() {
         // ✅ 监听系统路由变化 (一旦系统切回听筒，我们马上切回来)
         NotificationCenter.default.addObserver(self, selector: #selector(handleRouteChange), name: AVAudioSession.routeChangeNotification, object: nil)
+        // 音频中断监听（来电/闹钟/Siri 等抢占音频时，通话中要暂停并在结束后恢复）
+        NotificationCenter.default.addObserver(self, selector: #selector(handleAudioInterruption), name: AVAudioSession.interruptionNotification, object: nil)
         // 注意：这里不再立刻启动音频引擎。麦克风只在真正需要语音时才打开，
         // 纯文字聊天、待机时不占用麦克风（见 ensureSessionMode / settleSessionAfterStop）。
     }
@@ -103,11 +107,61 @@ class AudioService {
         // 打印调试，看看到底是谁改了路由
         print(">>> 🎧 Route Changed: \(reason)")
 
-        // 如果是新设备连接(如耳机)则不强制，否则强制切回扬声器
+        // 新设备接上（蓝牙/耳机）：直接返回，让系统用新设备，不抢路由。
         if reason == .newDeviceAvailable { return }
+        // 通话进行中：只有旧设备断开（蓝牙断开）才回扬声器；其他原因（未知/类别变化等）
+        // 不强制改路由——蓝牙抖动时强制切扬声器会把耳机抢走。
+        if voiceCallActive {
+            guard reason == .oldDeviceUnavailable else { return }
+        }
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             self.forceSpeaker()
+        }
+    }
+
+    /// 音频中断处理（来电、闹钟、Siri 等抢占音频）。
+    /// 通话进行中：began 时停录音/停播放（系统接管期间不抢），不改通话状态、不记失败；
+    /// ended 且 shouldResume 时重新激活会话、重启引擎、恢复录音；shouldResume 为 false 时保持暂停。
+    @objc private func handleAudioInterruption(notification: Notification) {
+        guard let userInfo = notification.userInfo,
+              let typeValue = userInfo[AVAudioSessionInterruptionTypeKey] as? UInt,
+              let type = AVAudioSession.InterruptionType(rawValue: typeValue) else { return }
+        switch type {
+        case .began:
+            print(">>> ⏸️ Audio interruption began")
+            interruptionWasRecording = isRecording
+            if isRecording { stopRecording() }
+            if isPlaying { stopPlaying() }
+        case .ended:
+            guard let optionsValue = userInfo[AVAudioSessionInterruptionOptionKey] as? UInt else { return }
+            let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+            guard options.contains(.shouldResume) else {
+                print(">>> ⏸️ Audio interruption ended, shouldResume=false, staying paused")
+                return
+            }
+            print(">>> ▶️ Audio interruption ended, resuming")
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+                sessionActive = true
+            } catch {
+                print("‼️ AudioSession reactivate after interruption failed: \(error.localizedDescription)")
+                return
+            }
+            if !engine.isRunning {
+                do { try engine.start() } catch {
+                    print("‼️ AudioEngine restart after interruption failed: \(error.localizedDescription)")
+                    return
+                }
+            }
+            // 通话仍在且中断前在录音：恢复录音（startRecording 重装 tap；会话已是 .record 且引擎已重启，
+            // 走 fast path 直接装 tap；若模式已变则先切回 .record 再装 tap）。
+            if voiceCallActive && interruptionWasRecording {
+                interruptionWasRecording = false
+                startRecording()
+            }
+        @unknown default:
+            break
         }
     }
 
@@ -150,7 +204,9 @@ class AudioService {
         do {
             if mode == .record {
                 // 录音才需要麦克风权限；用户拒绝时不切换、不启动引擎。
-                let hasPermission = await checkMicrophonePermission()
+                // 后台通话（voiceCallActive）绝不在这里弹授权窗（allowPrompt: false），
+                // intent 入口已先检查过权限，这里只是兜底。
+                let hasPermission = await checkMicrophonePermission(allowPrompt: !voiceCallActive)
                 guard epoch == sessionEpoch else { return } // reset 过，作废
                 guard hasPermission else {
                     print("‼️ AudioService: No microphone permission.")
@@ -160,8 +216,9 @@ class AudioService {
                 // ✅✅✅ 修改 1: Mode 改为 .default (最听话的模式) ✅✅✅
                 // .voiceChat 和 .videoChat 都有很强的系统预设，.default 最容易被 option 覆盖
                 if voiceCallActive {
-                    // 后台语音通话：用 .voiceChat（系统通话回声消除、默认听筒），不加 .defaultToSpeaker
-                    //（通话该走听筒，用户要免提点 App 内通话界面的扬声器）；App 内按住说话保持原来的 .default + 扬声器。
+                    // 后台语音通话：用 .voiceChat（系统通话回声消除、默认听筒），不加 .defaultToSpeaker；
+                    // 免提场景下 applySessionMode 末尾的延时 forceSpeaker() 会在无蓝牙/耳机时切到扬声器
+                    //（CallKit 已移除，没有系统通话界面管路由，App 自己管）。
                     try session.setCategory(.playAndRecord, mode: .voiceChat, options: [.allowBluetoothHFP, .allowBluetoothA2DP])
                 } else {
                     try session.setCategory(.playAndRecord, mode: .default, options: [.defaultToSpeaker, .allowBluetoothA2DP, .allowAirPlay])
@@ -301,8 +358,8 @@ class AudioService {
 
     // ✅ 强力切扬声器（只在录音模式下有意义；.playback 本来就走扬声器）
     func forceSpeaker() {
-        // 后台语音通话中：路由归系统通话界面管（听筒/扬声器/蓝牙），不强制切扬声器。
-        guard !voiceCallActive else { return }
+        // CallKit 已移除，没有系统通话界面管路由：通话中也由 App 自己管路由（蓝牙断开回扬声器靠它）。
+        // 下面仍有守卫：有耳机/蓝牙/AirPlay 时绝不强制切扬声器，不会抢走外部设备。
         // 会话未激活或不在录音模式时不碰路由，避免空闲/播放时意外重新占用麦克风
         guard engine.isRunning, sessionMode == .record else { return }
         let session = AVAudioSession.sharedInstance()
@@ -325,12 +382,14 @@ class AudioService {
         }
     }
 
-    func checkMicrophonePermission() async -> Bool {
+    /// 麦克风权限检查。allowPrompt = false 时（Siri / 快捷指令后台唤起），权限未决定也不弹授权窗，
+    /// 直接返回 false——后台绝不弹授权框，intent 入口会先用 .granted 挡掉未授权的调用。
+    func checkMicrophonePermission(allowPrompt: Bool = true) async -> Bool {
         let status = AVAudioApplication.shared.recordPermission
         switch status {
         case .granted: return true
         case .denied: return false
-        case .undetermined: return await AVAudioApplication.requestRecordPermission()
+        case .undetermined: return allowPrompt ? await AVAudioApplication.requestRecordPermission() : false
         @unknown default: return false
         }
     }
